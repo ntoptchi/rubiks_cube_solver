@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pydantic
+kociemba
+opencv-python
+numpy
