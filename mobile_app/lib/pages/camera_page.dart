@@ -26,6 +26,74 @@ class _CameraPageState extends State<CameraPage> {
     _initCamera();
   }
 
+  void _showError(String msg) {
+  showDialog(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Oops'),
+      content: Text(msg),
+      actions: [ TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')) ],
+    ),
+  );
+}
+ // 2) Upload & solve, with streamedResp and body in the same scope
+  Future<void> _uploadAndSolve() async {
+    setState(() => _isLoading = true);
+
+    try {
+      print('Uploading faces: $_photos');
+      final uri = Uri.parse('http://10.0.2.2:8000/scan');
+      final request = http.MultipartRequest('POST', uri);
+
+      for (var i = 0; i < 6; i++) {
+        request.files.add(
+          await http.MultipartFile.fromPath(
+            _faceNames[i],
+            _photos[i],
+          ),
+        );
+      }
+
+      // send with timeout
+      final streamedResp = await request
+          .send()
+          .timeout(const Duration(seconds: 15), onTimeout: () {
+        throw Exception('Request timed out');
+      });
+
+      // read the entire body
+      final body = await streamedResp.stream.bytesToString();
+      print('Response [${streamedResp.statusCode}]: $body');
+
+      setState(() => _isLoading = false);
+
+      if (streamedResp.statusCode == 200) {
+        final data = jsonDecode(body) as Map<String, dynamic>;
+        final moves = List<String>.from(data['solution']);
+
+        const host = 'http://10.0.2.2:8000';
+        const faces = ['U', 'R', 'F', 'D', 'L', 'B'];
+        final textureUrls = faces
+            .map((f) => '$host/static/textures/$f.png')
+            .toList();
+
+        Navigator.pushNamed(
+          context,
+          '/viewer',
+          arguments: textureUrls,
+        );
+      } else {
+        final errorDetail = (jsonDecode(body) as Map<String, dynamic>)['detail'] ?? body;
+        _showError('Scan failed: $errorDetail');
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      _showError('Upload error: $e');
+    }
+  }
+
+
+
   Future<void> _initCamera() async {
     _cameras = await availableCameras();
     _controller = CameraController(_cameras!.first, ResolutionPreset.medium);
@@ -61,9 +129,29 @@ class _CameraPageState extends State<CameraPage> {
       );
     }
 
-    final streamedResp = await request.send();
-    final body = await streamedResp.stream.bytesToString();
-    setState(() => _isLoading = false);
+    try {
+        print('Uploading faces: $_photos');
+        final streamedResp = await request
+            .send()
+            .timeout(const Duration(seconds: 15), onTimeout: () {
+          throw Exception('Request timed out');
+        });
+        final body = await streamedResp.stream.bytesToString();
+        print('Response [$streamedResp.statusCode]: $body');
+        setState(() => _isLoading = false);
+
+        if (streamedResp.statusCode == 200) {
+          // … success path …
+        } else {
+          final error = jsonDecode(body)['detail'] ?? body;
+          _showError('Scan failed: $error');
+        }
+      } catch (e) {
+        setState(() => _isLoading = false);
+        _showError('Upload error: $e');
+      }
+
+      
 
     if (streamedResp.statusCode == 200) {
       final data = jsonDecode(body) as Map<String, dynamic>;
