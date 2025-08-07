@@ -1,14 +1,12 @@
 # backend/scan.py
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from typing import List
+from fastapi import APIRouter, File, UploadFile, HTTPException
 import numpy as np
 import cv2
-from io import BytesIO
-from solver.kociemba_solver import solve_cube
-from utils.generate_textures import generate_all_textures
+from .solver.kociemba_solver import solve_cube
+from .utils.generate_textures import generate_all_textures
 
-app = FastAPI()
+router = APIRouter()
 
 # HSV color ranges for sticker classification
 COLOR_RANGES = {
@@ -84,7 +82,7 @@ def extract_facelets_image(data: bytes) -> str:
                 face_str += 'W'
     return face_str  # e.g. "WWGRROO...B"
 
-@app.post("/scan")
+@router.post("/scan")
 async def scan_faces(
     up: UploadFile = File(...),
     right: UploadFile = File(...),
@@ -116,7 +114,7 @@ async def scan_faces(
     except Exception as e:
         raise HTTPException(500, f"Unexpected error: {e}")
 
-from utils.generate_textures import generate_all_textures
+
 
 
 
