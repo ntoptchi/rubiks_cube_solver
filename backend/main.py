@@ -1,15 +1,16 @@
-# backend/main.py
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Dict
 from backend.solver.kociemba_solver import solve_cube
 from fastapi.staticfiles import StaticFiles
-
+from backend.scan import router as scan_router
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+from pathlib import Path
+BASE = Path(__file__).parent
+app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
+
 
 # Mapping from your color initials → Kociemba face letters
 COLOR_TO_FACE = {
@@ -60,6 +61,8 @@ def solve(cube: CubeState):
         return {"solution": moves}
     except Exception as e:
         raise HTTPException(400, f"Solver error: {e}")
+
+app.include_router(scan_router)
 
 @app.get("/")
 def read_root():
