@@ -10,13 +10,26 @@ router = APIRouter()
 
 # HSV color ranges for sticker classification
 COLOR_RANGES = {
-    'W': ((0, 0, 200), (180, 40, 255)),
-    'Y': ((20, 100, 100), (30, 255, 255)),
-    'R': ((0, 100, 100), (10, 255, 255)),
-    'O': ((10, 100, 100), (20, 255, 255)),
-    'G': ((50, 100, 100), (70, 255, 255)),
-    'B': ((90, 100, 100), (130, 255, 255)),
+    # White: low saturation, high value
+    'W': ((0, 0, 210), (180, 30, 255)),
+
+    # Yellow
+    'Y': ((25, 80, 80), (35, 255, 255)),
+
+    # Red (two ranges: 0–10 and 170–180)
+    'R1': ((0, 120, 70), (10, 255, 255)),
+    'R2': ((170, 120, 70), (180, 255, 255)),
+
+    # Orange (may need to tweak as needed for the rubiks stickers)
+    'O': ((10, 120, 70), (22, 255, 255)),
+
+    # Green
+    'G': ((45, 60, 60), (85, 255, 255)),
+
+    # Blue
+    'B': ((90, 60, 60), (130, 255, 255)),
 }
+
 
 def order_points(pts: np.ndarray) -> np.ndarray:
     # sort by x-coordinate
@@ -30,57 +43,73 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     return np.array([tl, tr, br, bl], dtype="float32")
 
 def extract_facelets_image(data: bytes) -> str:
-    # decode image
     arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("Could not decode image")
 
-    # find largest contour (presumed cube face)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 60, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    max_dim = 900
+    h, w = img.shape[:2]
+    s = max_dim / max(h, w)
+
+    if s < 1.0:
+        img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+    # 1) Pre‐process
+    gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5,5), 0)
+    edges   = cv2.Canny(blurred, 50, 150)
+    kernel  = cv2.getStructuringElement(cv2.MORPH_RECT, (7,7))
+    closed  = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+    # 2) Find contours
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         raise ValueError("No contours found")
+
     c = max(contours, key=cv2.contourArea)
-    peri = cv2.arcLength(c, True)
+    peri   = cv2.arcLength(c, True)
     approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-    if len(approx) != 4:
-        raise ValueError("Could not detect quadrilateral")
 
-    pts = order_points(approx.reshape(4, 2))
-    # compute max width/height
-    (tl, tr, br, bl) = pts
-    widthA = np.linalg.norm(br - bl)
-    widthB = np.linalg.norm(tr - tl)
-    maxW = int(max(widthA, widthB))
-    heightA = np.linalg.norm(tr - br)
-    heightB = np.linalg.norm(tl - bl)
-    maxH = int(max(heightA, heightB))
+    # 3) Quad or fallback
+    if len(approx) == 4:
+        pts = order_points(approx.reshape(4,2))
+    else:
+        # fallback to min‐area rectangle
+        rect = cv2.minAreaRect(c)
+        box  = cv2.boxPoints(rect).astype("float32")
+        pts  = order_points(box)
 
-    # perspective transform
-    dst = np.array([[0, 0], [maxW, 0], [maxW, maxH], [0, maxH]], dtype="float32")
-    M = cv2.getPerspectiveTransform(pts, dst)
-    warp = cv2.warpPerspective(img, M, (maxW, maxH))
+    # 4) Perspective warp as before
+    tl, tr, br, bl = pts
+    W0 = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+    H0 = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+    cap = 600
+    scale = min(1.0, cap / max(W0, H0))
+    W = max(3, int(W0 * scale))
+    H = max(3, int(H0 * scale))
 
-    # split into 3×3 grid and classify each cell
-    face_str = ""
-    cellW, cellH = maxW // 3, maxH // 3
+
+    dst = np.array([[0,0],[W,0],[W,H],[0,H]], dtype="float32")
+    M   = cv2.getPerspectiveTransform(pts, dst)
+    warp = cv2.warpPerspective(img, M, (W, H))
+
+    # 5) Split & classify facelets (same as you have)
     hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
-    for row in range(3):
-        for col in range(3):
-            x0, y0 = col * cellW, row * cellH
-            cell = hsv[y0:y0 + cellH, x0:x0 + cellW]
-            avg = cv2.mean(cell)[:3]  # average HSV
-            # find which color range contains this avg
-            for color, (lower, upper) in COLOR_RANGES.items():
+    face_str, cellW, cellH = "", W//3, H//3
+    for r in range(3):
+        for c in range(3):
+            cell = hsv[r*cellH:(r+1)*cellH, c*cellW:(c+1)*cellW]
+            avg = cv2.mean(cell)[:3]
+            for key, (lower, upper) in COLOR_RANGES.items():
                 if all(lower[i] <= avg[i] <= upper[i] for i in range(3)):
+                    color = 'R' if key in ('R1','R2') else key
                     face_str += color
                     break
             else:
-                # fallback or error
-                face_str += 'W'
-    return face_str  # e.g. "WWGRROO...B"
+                face_str += 'W'  # fallback (you can also raise to force re-capture)
+
+                        
+            return face_str
 
 @router.post("/scan")
 async def scan_faces(
@@ -91,6 +120,8 @@ async def scan_faces(
     left: UploadFile = File(...),
     back: UploadFile = File(...),
 ):
+    print("→ /scan called with files:", up.filename, right.filename, front.filename,
+          down.filename, left.filename, back.filename)
     try:
         # read all six files
         files = await up.read(), await right.read(), await front.read(), \
@@ -98,6 +129,11 @@ async def scan_faces(
 
         # extract each into a 9‐char string
         facelets = [extract_facelets_image(data) for data in files]
+
+        print("DEBUG facelets:", facelets)
+        cube_str = "".join(facelets)
+        print("DEBUG cube_str:", cube_str, "len=", len(cube_str))
+
 
         # ─── NEW: generate per‐face textures ───
         face_strs = dict(zip(['U','R','F','D','L','B'], facelets))
