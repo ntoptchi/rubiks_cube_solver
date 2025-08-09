@@ -55,6 +55,38 @@ def solve(cube: CubeState):
     # 3) Build the cube string in URFDLB order
     cube_str = "".join(facelets)
 
+    faces_order = ['U','R','F','D','L','B']
+    centers = [s[4] for s in facelets]  # center color per face image
+
+    # ensure centers are 6 distinct colors
+    if len(set(centers)) != 6:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Scan error: centers not unique. Centers={centers}. "
+                f"Lighting/thresholds likely misclassified (reds/oranges are tricky)."
+        )
+
+    # build color->face map (e.g. {'W':'U', 'R':'R', ...})
+    color_to_face = {centers[i]: faces_order[i] for i in range(6)}
+
+    # rewrite each sticker to its face letter
+    solver_facelets = []
+    for s in facelets:
+        out = []
+        for ch in s:
+            if ch not in color_to_face:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Scan error: unknown color '{ch}' not in centers {centers}"
+                )
+            out.append(color_to_face[ch])
+        solver_facelets.append(''.join(out))
+
+    cube_str = ''.join(solver_facelets)  # now only letters from URFDLB    
+
+    face_strs = dict(zip(['U','R','F','D','L','B'], facelets))
+    generate_all_textures(face_strs, out_dir="static/textures")
+
     # 4) Solve and return
     try:
         moves = solve_cube(cube_str).split()
