@@ -57,8 +57,8 @@ class _CameraPageState extends State<CameraPage> {
 
       final streamedResp = await request
           .send()
-          .timeout(const Duration(seconds: 15), onTimeout: () {
-        throw Exception('Request timed out');
+          .timeout(const Duration(seconds: 60), onTimeout: () {
+        throw Exception('Request timed out (60s)');
       });
 
       final body = await streamedResp.stream.bytesToString();
