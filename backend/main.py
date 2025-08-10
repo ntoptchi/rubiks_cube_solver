@@ -4,7 +4,7 @@ from typing import Dict
 from backend.solver.kociemba_solver import solve_cube
 from fastapi.staticfiles import StaticFiles
 from backend.scan import router as scan_router
-#github destkp
+
 app = FastAPI()
 
 from pathlib import Path
