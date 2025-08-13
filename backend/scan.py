@@ -1,10 +1,16 @@
-# backend/scan.py
-
 from fastapi import APIRouter, File, UploadFile, HTTPException
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Tuple
+from itertools import product
 import numpy as np
 import cv2
+import time
 from .solver.kociemba_solver import solve_cube
 from .utils.generate_textures import generate_all_textures
+
+from pathlib import Path
+TEXTURE_DIR = Path(__file__).parent / "static" / "textures"
+TEXTURE_DIR.mkdir(parents=True, exist_ok=True)
 
 router = APIRouter()
 
@@ -30,6 +36,17 @@ COLOR_RANGES = {
     'B': ((90, 60, 60), (130, 255, 255)),
 }
 
+def rotate_grid_cw(grid: List[List[str]], k: int) -> List[List[str]]:
+    """Rotate a 3x3 grid k times 90° clockwise."""
+    k %= 4
+    g = [row[:] for row in grid]
+    for _ in range(k):
+        g = [[g[2 - c][r] for c in range(3)] for r in range(3)]
+    return g
+
+def flatten_grid(grid: List[List[str]]) -> str:
+    return ''.join(''.join(row) for row in grid)
+
 
 def order_points(pts: np.ndarray) -> np.ndarray:
     # sort by x-coordinate
@@ -42,7 +59,16 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     tr, br = right[np.argsort(right[:, 1]), :]
     return np.array([tl, tr, br, bl], dtype="float32")
 
-def extract_facelets_image(data: bytes) -> str:
+def classify_color(avg_hsv: Tuple[float,float,float]) -> Tuple[str, float]:
+    """Return (color_char, confidence 0..1). Confidence is naive here."""
+    for key, (lo, hi) in COLOR_RANGES.items():
+        if all(lo[i] <= avg_hsv[i] <= hi[i] for i in range(3)):
+            return 'R' if key in ('R1', 'R2') else key
+    raise ValueError(f"unclassified hsv={tuple(round(x,1) for x in avg_hsv)}")
+    
+    
+
+def extract_face_grid(data: bytes) -> Dict[str, Any]:
     arr = np.frombuffer(data, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -95,61 +121,148 @@ def extract_facelets_image(data: bytes) -> str:
 
     # 5) Split & classify facelets (same as you have)
     hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
-    face_str, cellW, cellH = "", W//3, H//3
+    grid: List[List[str]] = []
+    conf: List[List[float]] = []
+    avg_hsv: List[List[Tuple[float,float,float]]] = []
+
+    cellW, cellH = W//3, H//3
     for r in range(3):
-        for c in range(3):
-            cell = hsv[r*cellH:(r+1)*cellH, c*cellW:(c+1)*cellW]
+        row_c, row_p, row_h = [], [], []
+        for c_ in range(3):
+            cell = hsv[r*cellH:(r+1)*cellH, c_*cellW:(c_+1)*cellW]
             avg = cv2.mean(cell)[:3]
-            for key, (lower, upper) in COLOR_RANGES.items():
-                if all(lower[i] <= avg[i] <= upper[i] for i in range(3)):
-                    color = 'R' if key in ('R1','R2') else key
-                    face_str += color
-                    break
-            else:
-                face_str += 'W'  # fallback (you can also raise to force re-capture)
+            try:
+                color = classify_color(avg)
+            except ValueError as e:
+                # Include the cell coordinate to help the UI show what to re-capture
+                raise ValueError(f"Unclassified cell at ({r},{c_}): {e}") from None
+            row_c.append(color)
+            row_p.append(1.0) # naive confidence
+            row_h.append(tuple(float(x) for x in avg))
+        grid.append(row_c)
+        conf.append(row_p)
+        avg_hsv.append(row_h)
 
-                        
-            return face_str
+    center = grid[1][1]  # middle sticker color
+    rotation = 0         # (optionally compute later)
+    corners = pts.tolist()
 
-@router.post("/scan")
-async def scan_faces(
-    up: UploadFile = File(...),
-    right: UploadFile = File(...),
-    front: UploadFile = File(...),
-    down: UploadFile = File(...),
-    left: UploadFile = File(...),
-    back: UploadFile = File(...),
-):
-    print("→ /scan called with files:", up.filename, right.filename, front.filename,
-          down.filename, left.filename, back.filename)
-    try:
-        # read all six files
-        files = await up.read(), await right.read(), await front.read(), \
-                await down.read(), await left.read(), await back.read()
+    return {
+        "grid": grid,
+        "center": center,
+        "rotation": rotation,
+        "corners": corners,
+        "conf": conf,
+        "avg_hsv": avg_hsv,
+    }
 
-        # extract each into a 9‐char string
-        facelets = [extract_facelets_image(data) for data in files]
+class FaceGrid(BaseModel):
+    grid: List[List[str]] = Field(..., description="3x3 of color letters: W/Y/R/O/G/B")
+    rotation: int = 0
 
-        print("DEBUG facelets:", facelets)
-        cube_str = "".join(facelets)
-        print("DEBUG cube_str:", cube_str, "len=", len(cube_str))
+class SolveRequest(BaseModel):
+    faces: Dict[str, FaceGrid]  # keys must be U,R,F,D,L,B
 
+@router.post("/scan_face")
+async def scan_face(image: UploadFile = File(...)):
+    t0 = time.perf_counter()
+    data = await image.read()
+    result = extract_face_grid(data)
+    print(f"→ /scan_face processed in {time.perf_counter()-t0:.2f}s, center={result['center']}")
+    return result
 
-        # ─── NEW: generate per‐face textures ───
-        face_strs = dict(zip(['U','R','F','D','L','B'], facelets))
-        # this writes: backend/static/textures/U.png, etc.
-        generate_all_textures(face_strs, out_dir="static/textures")
+@router.post("/solve_from_grids")
+async def solve_from_grids(req: SolveRequest):
+    # 1) Validate keys
+    required = ['U','R','F','D','L','B']
+    if sorted(req.faces.keys()) != sorted(required):
+        raise HTTPException(400, f"faces must include exactly {required}")
 
-        # assemble in Kociemba order: U R F D L B
-        cube_str = "".join(facelets)
+# 1) Collect raw color grids (3x3 each)
+    raw_grids: Dict[str, List[List[str]]] = {f: req.faces[f].grid for f in required}
+    for f, g in raw_grids.items():
+        if len(g) != 3 or any(len(row) != 3 for row in g):
+            raise HTTPException(400, f"{f} grid must be 3x3")
+
+    # 2) Build color -> face mapping from centers (center is invariant to rotation)
+    centers = [raw_grids[f][1][1] for f in required]
+    if len(set(centers)) != 6:
+        raise HTTPException(400, f"centers not unique; centers={centers}")
+    color_to_face = {centers[i]: required[i] for i in range(6)}
+
+    # Optional preflight: verify we only saw these 6 colors 9 times each total
+    all_colors = ''.join(flatten_grid(raw_grids[f]) for f in required)
+    color_counts = {c: all_colors.count(c) for c in set(all_colors)}
+    bad = [c for c in color_counts if c not in color_to_face or color_counts[c] != 9]
+    if bad:
+        raise HTTPException(400, f"color count issue: {color_counts}. "
+                                 f"Expect each of {list(color_to_face.keys())} to appear 9 times.")
+
+    # 3) Try auto-rotations.
+    # Anchor U at 0° to cut search space, try all 4 for the other 5 faces (4^5=1024 combos).
+    faces_to_search = ['R', 'F', 'D', 'L', 'B']
+    for combo in product(range(4), repeat=len(faces_to_search)):
+        rot_map = {'U': 0}
+        rot_map.update({faces_to_search[i]: combo[i] for i in range(len(faces_to_search))})
+
+        # Build solver string in URFDLB order after rotating each face and mapping colors -> face letters
+        mapped_facelets = []
+        for f in required:
+            g_rot = rotate_grid_cw(raw_grids[f], rot_map[f])
+            s_color = flatten_grid(g_rot)
+            try:
+                s_face = ''.join(color_to_face[ch] for ch in s_color)
+            except KeyError as e:
+                # an unexpected color slipped in
+                raise HTTPException(400, f"unknown color '{e.args[0]}' (centers={centers})")
+            mapped_facelets.append(s_face)
+
+        cube_str = ''.join(mapped_facelets)
+
+        # Counts sanity on face letters
+        if any(cube_str.count(face) != 9 for face in required):
+            continue
+
+        # Try solving; if invalid orientation/permutation, the solver will raise
+        try:
+            moves = solve_cube(cube_str).split()
+            # SUCCESS — generate textures using the same rotations so the viewer matches
+            from pathlib import Path
+            TEXTURE_DIR = Path(__file__).parent / "static" / "textures"
+            TEXTURE_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Rotate color grids the same way for the textures:
+            rotated_for_textures = {
+                f: flatten_grid(rotate_grid_cw(raw_grids[f], rot_map[f]))
+                for f in required
+            }
+            generate_all_textures(rotated_for_textures, out_dir=str(TEXTURE_DIR))
+            textures = {f: f"/static/textures/{f}.png" for f in required}
+
+            return {"solution": moves, "textures": textures, "rotations": rot_map}
+        except Exception:
+            # try next rotation combo
+            continue
+
+    # If we got here, no rotation combo yielded a valid cube
+    raise HTTPException(
+        400,
+        "auto-rotation failed: could not find a consistent orientation. "
+        "Please recapture with the on-screen alignment guides."
+    )
+
+    # 4) Solve
+try:
         moves = solve_cube(cube_str).split()
-        return {"solution": moves}
-
-    except ValueError as ve:
-        raise HTTPException(400, f"Scan error: {ve}")
     except Exception as e:
-        raise HTTPException(500, f"Unexpected error: {e}")
+        raise HTTPException(400, f"solver error: {e}")
 
+    # 5) Generate textures from color strings for 3D viewer
+    generate_all_textures(color_facelets, out_dir=str(TEXTURE_DIR))
+    host_prefix = ""  # leave empty here; build full URLs in client
+    textures = {f: f"{host_prefix}/static/textures/{f}.png" for f in required}
+
+    return {"solution": moves, "textures": textures}
 
 
 
