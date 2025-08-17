@@ -11,6 +11,9 @@ from pathlib import Path
 BASE = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 
+@app.get("/health")
+def health():
+    return {"ok": True, "service": "rubiks-backend"}
 
 # Mapping from your color initials → Kociemba face letters
 COLOR_TO_FACE = {
