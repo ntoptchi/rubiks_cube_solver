@@ -1,29 +1,38 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:http/http.dart' as http;
+
+import '../services/api.dart'; // uploadOneFace, solveFromGrids, baseUrl
 
 class CameraPage extends StatefulWidget {
   const CameraPage({Key? key}) : super(key: key);
 
   @override
-  _CameraPageState createState() => _CameraPageState();
+  State<CameraPage> createState() => _CameraPageState();
 }
 
 class _CameraPageState extends State<CameraPage> {
   List<CameraDescription>? _cameras;
   CameraController? _controller;
-  bool _isCameraReady = false;
-  bool _isLoading = false;
 
+  bool _isCameraReady = false;
+  bool _isUploading = false;
+
+  // New per-face flow state
+  final List<String> _faceOrder = ['U', 'R', 'F', 'D', 'L', 'B'];
   int _currentFace = 0;
-  final List<String> _faceNames = ['up', 'right', 'front', 'down', 'left', 'back'];
-  final List<String> _photos = [];
+  final Map<String, List<List<String>>> _grids = {};
 
   @override
   void initState() {
     super.initState();
     _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    _cameras = await availableCameras();
+    _controller = CameraController(_cameras!.first, ResolutionPreset.medium);
+    await _controller!.initialize();
+    if (mounted) setState(() => _isCameraReady = true);
   }
 
   void _showError(String msg) {
@@ -33,96 +42,78 @@ class _CameraPageState extends State<CameraPage> {
         title: const Text('Oops'),
         content: Text(msg),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          )
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
         ],
       ),
     );
   }
 
-  Future<void> _uploadAndSolve() async {
-    setState(() => _isLoading = true);
+  Future<void> _capture() async {
+    if (!_isCameraReady || _controller == null || _isUploading) return;
 
+    final shot = await _controller!.takePicture();
+    final capturedPath = shot.path;
+
+    final String currentLabel = _faceOrder[_currentFace];
+
+    setState(() => _isUploading = true);
     try {
-      final uri = Uri.parse('http://127.0.0.1:8000/scan');
+      // Upload ONE face → get 3×3 grid
+      final res = await uploadOneFace(capturedPath);
+      final grid = (res['grid'] as List)
+          .map((row) => List<String>.from(row as List))
+          .toList();
+      _grids[currentLabel] = grid;
 
-      final request = http.MultipartRequest('POST', uri);
-      for (var i = 0; i < 6; i++) {
-        request.files.add(
-          await http.MultipartFile.fromPath(_faceNames[i], _photos[i]),
-        );
-      }
+      // Next face
+      setState(() => _currentFace++);
 
-      final streamedResp = await request
-          .send()
-          .timeout(const Duration(seconds: 60), onTimeout: () {
-        throw Exception('Request timed out (60s)');
-      });
+      // When all six faces captured → solve
+      if (_currentFace == _faceOrder.length) {
+        final solved = await solveFromGrids(_grids);
+        final textures = Map<String, dynamic>.from(solved['textures'] as Map);
 
-      final body = await streamedResp.stream.bytesToString();
-      print('Response [${streamedResp.statusCode}]: $body');
-      setState(() => _isLoading = false);
+        // Build absolute URLs for viewer
+        final images = ['U','R','F','D','L','B']
+            .map((f) => '$baseUrl${textures[f]}')
+            .toList();
 
-      if (streamedResp.statusCode == 200) {
-        final data = jsonDecode(body) as Map<String, dynamic>;
-        final moves = List<String>.from(data['solution']);
-
-        const host = 'http://192.168.1.49:8000';
-        const faces = ['U', 'R', 'F', 'D', 'L', 'B'];
-        final textureUrls = faces.map((f) => '$host/static/textures/$f.png').toList();
-
-        Navigator.pushNamed(context, '/viewer', arguments: textureUrls);
-      } else {
-        final errorDetail = (jsonDecode(body) as Map<String, dynamic>)['detail'] ?? body;
-        _showError('Scan failed: $errorDetail');
+        if (!mounted) return;
+        Navigator.pushNamed(context, '/viewer', arguments: images);
+        // Or navigate to your moves page using solved['solution'] if you prefer
       }
     } catch (e) {
-      setState(() => _isLoading = false);
-      _showError('Upload error: $e');
-    }
-  }
-
-  Future<void> _initCamera() async {
-    _cameras = await availableCameras();
-    _controller = CameraController(_cameras!.first, ResolutionPreset.medium);
-    await _controller!.initialize();
-    setState(() => _isCameraReady = true);
-  }
-
-  Future<void> _capture() async {
-    if (!_isCameraReady || _controller == null) return;
-    final file = await _controller!.takePicture();
-    setState(() {
-      _photos.add(file.path);
-      _currentFace++;
-    });
-    if (_currentFace == 6) {
-      _uploadAndSolve();
+      if (!mounted) return;
+      _showError('Scan failed: $e');
+    } finally {
+      if (mounted) setState(() => _isUploading = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
     if (!_isCameraReady || _controller == null) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    if (_currentFace < 6) {
-      final label = ['Up', 'Right', 'Front', 'Down', 'Left', 'Back'][_currentFace];
-      return Scaffold(
-        appBar: AppBar(title: Text('Capture $label Face')),
-        body: CameraPreview(_controller!),
-        floatingActionButton: FloatingActionButton(
-          onPressed: _capture,
-          child: const Icon(Icons.camera_alt),
-        ),
-      );
-    }
-    return const Scaffold(body: SizedBox.shrink());
+
+    final faceLabel = _faceOrder[_currentFace];
+    return Scaffold(
+      appBar: AppBar(title: Text('Capture $faceLabel face')),
+      body: Stack(
+        children: [
+          CameraPreview(_controller!),
+          if (_isUploading)
+            Container(
+              color: Colors.black45,
+              child: const Center(child: CircularProgressIndicator()),
+            ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _isUploading ? null : _capture,
+        child: const Icon(Icons.camera_alt),
+      ),
+    );
   }
 
   @override
