@@ -15,6 +15,8 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 def health():
     return {"ok": True, "service": "rubiks-backend"}
 
+app.include_router(scan_router)
+
 # Mapping from your color initials → Kociemba face letters
 COLOR_TO_FACE = {
     "W": "U",  # White → Up
