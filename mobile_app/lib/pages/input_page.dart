@@ -4,15 +4,40 @@ import 'dart:convert';
 import '../utils/cube_model.dart';
 import 'solution_page.dart';
 import 'camera_page.dart';
+import '../services/api.dart';
+
+
 
 class InputPage extends StatefulWidget {
   const InputPage({Key? key}) : super(key: key);
 
   @override
   _InputPageState createState() => _InputPageState();
+
+  
+  
 }
 
 class _InputPageState extends State<InputPage> {
+
+@override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final ok = await pingHealth();
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Backend unreachable. If on a real device, run: adb reverse tcp:8000 tcp:8000',
+            ),
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+    });
+  }
+
   final Map<String, List<String>> faces = {
     'U': List.filled(9, 'W'),
     'R': List.filled(9, 'R'),
