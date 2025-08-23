@@ -9,7 +9,7 @@ import cv2
 
 from .solver.kociemba_solver import solve_cube
 from .utils.generate_textures import generate_all_textures
-from .schemas import FaceGrid, SolveRequest
+from .schemas import SolveRequest
 
 # Where textures will be written
 TEXTURE_DIR = Path(__file__).parent / "static" / "textures"
@@ -44,7 +44,7 @@ COLOR_RANGES: Dict[str, Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {
 COLOR_ANCHORS: Dict[str, Tuple[float, float, float]] = {
     'W': (  0.0,  10.0, 230.0),
     'Y': ( 30.0, 180.0, 200.0),
-    'R': (  0.0, 180.0, 180.0),  # special: also treat 180 as red hue wrap when computing distance
+    'R': (  0.0, 180.0, 180.0),  # special: also treat 180 as red hue wrap
     'O': ( 17.0, 180.0, 200.0),
     'G': ( 60.0, 180.0, 180.0),
     'B': (110.0, 180.0, 180.0),
@@ -94,12 +94,10 @@ def nearest_color(avg_hsv: Tuple[float, float, float]) -> str:
 
 def classify_color_relaxed(avg_hsv: Tuple[float, float, float]) -> str:
     """Try expanded ranges before nearest-color."""
-    # 1) Expanded ranges per color
     for key, (lo, hi) in COLOR_RANGES.items():
         lo2, hi2 = expand_range(lo, hi)
         if all(lo2[i] <= avg_hsv[i] <= hi2[i] for i in range(3)):
             return 'R' if key in ('R1','R2') else key
-    # 2) Nearest anchor fallback
     return nearest_color(avg_hsv)
 
 def preprocess_variants(img_bgr: np.ndarray) -> List[Tuple[str, np.ndarray]]:
@@ -111,7 +109,6 @@ def preprocess_variants(img_bgr: np.ndarray) -> List[Tuple[str, np.ndarray]]:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     hsv  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
 
-    # Common helpers
     def morph_close(edges, k=7):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
         return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
@@ -265,7 +262,6 @@ def extract_face_grid_timed(data: bytes):
 
     # Final validation: make sure no '?' remain
     if any(grid[r][c] == '?' for r in range(3) for c in range(3)):
-        # include one failing sample in message
         bad = [(r, c, tuple(round(x,1) for x in avg_hsv[r][c]))
                for r in range(3) for c in range(3) if grid[r][c] == '?']
         raise ValueError(f"Unclassified cells remain after multipass: {bad[:3]}")
@@ -291,6 +287,11 @@ def rotate_grid_cw(grid: List[List[str]], k: int) -> List[List[str]]:
 
 def flatten_grid(grid: List[List[str]]) -> str:
     return ''.join(''.join(row) for row in grid)
+
+def face_mode(grid: List[List[str]]) -> str:
+    """Majority color on a 3x3 face."""
+    flat = [ch for row in grid for ch in row]
+    return max(set(flat), key=flat.count)
 
 # ---------- Routes ----------
 
@@ -333,6 +334,14 @@ async def scan_face(image: UploadFile = File(...)):
                 if grid[r][c] not in allowed:
                     raise HTTPException(400, f"Unknown color '{grid[r][c]}' at ({r},{c}).")
 
+        # Majority-correct the center if it's the odd one out
+        flat = [p for row in grid for p in row]
+        mcolor = max(set(flat), key=flat.count)
+        if flat.count(mcolor) >= 5 and grid[1][1] != mcolor:
+            grid[1][1] = mcolor
+            res["grid"] = grid
+            res["center"] = mcolor
+
         return res
 
     except ValueError as ve:
@@ -355,11 +364,11 @@ async def solve_from_grids(req: SolveRequest):
         if len(g) != 3 or any(len(row) != 3 for row in g):
             raise HTTPException(400, f"{f} grid must be 3x3")
 
-    # 2) Build color -> face mapping from centers
-    centers = [raw_grids[f][1][1] for f in required]
-    if len(set(centers)) != 6:
-        raise HTTPException(400, f"centers not unique; centers={centers}")
-    color_to_face = {centers[i]: required[i] for i in range(6)}
+    # 2) Build color -> face mapping from majority centers
+    centers_by_face = {f: face_mode(raw_grids[f]) for f in required}
+    if len(set(centers_by_face.values())) != 6:
+        raise HTTPException(400, f"centers not unique; centers={centers_by_face}")
+    color_to_face = {color: face for face, color in centers_by_face.items()}
 
     # Optional: color counts sanity
     all_colors = ''.join(flatten_grid(raw_grids[f]) for f in required)
@@ -385,7 +394,7 @@ async def solve_from_grids(req: SolveRequest):
             try:
                 s_face = ''.join(color_to_face[ch] for ch in s_color)
             except KeyError as e:
-                raise HTTPException(400, f"unknown color '{e.args[0]}' (centers={centers})")
+                raise HTTPException(400, f"unknown color '{e.args[0]}' (centers={centers_by_face})")
             mapped_facelets.append(s_face)
 
         cube_str = ''.join(mapped_facelets)
