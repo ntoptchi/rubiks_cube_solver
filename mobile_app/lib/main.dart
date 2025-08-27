@@ -18,17 +18,14 @@ class MyApp extends StatelessWidget {
       home: const InputPage(),
       routes: {
         '/camera': (_) => const CameraPage(),
-      },
-      onGenerateRoute: (settings) {
-        if (settings.name == '/viewer') {
-          // Expecting a Map<String, String> of face->absoluteTextureUrl
-          final urls = Map<String, String>.from(settings.arguments as Map);
-          return MaterialPageRoute(
-            builder: (_) => CubeViewer(textureUrls: urls),
+        '/viewer': (ctx) {
+          final textureMap = Map<String, String>.from(
+            ModalRoute.of(ctx)!.settings.arguments as Map,
           );
-        }
-        return null; // fallback to default
+          return CubeViewer(textureUrls: textureMap);
+        },
       },
     );
   }
 }
+
