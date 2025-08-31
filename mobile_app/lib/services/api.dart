@@ -1,59 +1,12 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:flutter/foundation.dart';
 
-/// Use 127.0.0.1 with `adb reverse` on a real device.
-/// On the Android emulator, use http://10.0.2.2:8000 instead.
-const String baseUrl = 'http://127.0.0.1:8000';
-
-Future<Map<String, dynamic>> uploadOneFace(String imagePath) async {
-  final uri = Uri.parse('$baseUrl/scan_face');
-  final req = http.MultipartRequest('POST', uri)
-    ..files.add(await http.MultipartFile.fromPath('image', imagePath));
-  debugPrint('→ POST $uri (image=$imagePath)');
-  final streamed = await req.send();
-  final body = await streamed.stream.bytesToString();
-  debugPrint('← ${streamed.statusCode} $body');
-  if (streamed.statusCode != 200) {
-    throw Exception('scan_face failed: ${streamed.statusCode} $body');
-  }
-  return jsonDecode(body) as Map<String, dynamic>;
-}
-
-Future<Map<String, dynamic>> solveFromGrids(
-  Map<String, List<List<String>>> grids,
-) async {
-  // Backend expects: {"faces": { "U": {"grid":[...], "rotation":0}, ... }}
-  const order = ['U', 'R', 'F', 'D', 'L', 'B'];
-  final faces = <String, dynamic>{};
-  for (final f in order) {
-    final g = grids[f];
-    if (g == null) throw ArgumentError('Missing face $f');
-    faces[f] = {
-      'grid': g,
-      'rotation': 0, // we let the backend auto-rotate
-    };
-  }
-
-  final uri = Uri.parse('$baseUrl/solve_from_grids');
-  final body = jsonEncode({'faces': faces});
-  debugPrint('→ POST $uri');
-  final resp = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: body,
-  );
-  debugPrint('← ${resp.statusCode} ${resp.body}');
-  if (resp.statusCode != 200) {
-    throw Exception('solve_from_grids failed: ${resp.statusCode} ${resp.body}');
-  }
-  return jsonDecode(resp.body) as Map<String, dynamic>;
-}
+const baseUrl = 'http://127.0.0.1:8000/api'; // using adb reverse on a real device
 
 Future<bool> pingHealth() async {
   try {
     final r = await http
-        .get(Uri.parse('$baseUrl/health'))
+        .get(Uri.parse(baseUrl.replaceFirst('/api', '/health')))
         .timeout(const Duration(seconds: 3));
     return r.statusCode == 200;
   } catch (_) {
@@ -61,3 +14,37 @@ Future<bool> pingHealth() async {
   }
 }
 
+Future<Map<String, dynamic>> uploadOneFace(String imagePath) async {
+  final uri = Uri.parse('$baseUrl/scan_face');
+  final req = http.MultipartRequest('POST', uri)
+    ..files.add(await http.MultipartFile.fromPath('image', imagePath));
+
+  final resp = await req.send().timeout(const Duration(seconds: 15));
+  final body = await resp.stream.bytesToString();
+  if (resp.statusCode != 200) {
+    throw Exception('scan_face failed: ${resp.statusCode} $body');
+  }
+  final map = jsonDecode(body) as Map<String, dynamic>;
+  return map;
+}
+
+Future<Map<String, dynamic>> solveFromGrids(
+  Map<String, List<List<String>>> grids,
+) async {
+  final uri = Uri.parse('$baseUrl/solve_from_grids');
+  final faces = <String, dynamic>{};
+  for (final f in ['U','R','F','D','L','B']) {
+    faces[f] = {'grid': grids[f], 'rotation': 0};
+  }
+  final resp = await http
+      .post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'faces': faces}),
+      )
+      .timeout(const Duration(seconds: 20));
+  if (resp.statusCode != 200) {
+    throw Exception(jsonDecode(resp.body)['detail'] ?? 'server error');
+  }
+  return jsonDecode(resp.body) as Map<String, dynamic>;
+}
