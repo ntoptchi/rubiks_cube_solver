@@ -11,7 +11,7 @@ from .solver.kociemba_solver import solve_cube
 from .utils.generate_textures import generate_all_textures
 from .schemas import FaceGrid, SolveRequest
 
-# Where textures will be written
+# This is where textures will be written
 TEXTURE_DIR = Path(__file__).parent / "static" / "textures"
 TEXTURE_DIR.mkdir(parents=True, exist_ok=True)
 
