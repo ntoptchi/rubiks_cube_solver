@@ -22,7 +22,7 @@ class MyApp extends StatelessWidget {
           return CubeViewer(textureUrls: urls);
         },
       },
-      // Optional safety net so unknown routes don’t crash:
+      // safety net so unknown routes don’t crash:
       onUnknownRoute: (_) => MaterialPageRoute(builder: (_) => const InputPage()),
     );
   }
