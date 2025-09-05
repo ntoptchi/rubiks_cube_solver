@@ -188,7 +188,7 @@ class _CameraPageState extends State<CameraPage> {
         final solved = await solveFromGrids(_grids);
         final textures = Map<String, dynamic>.from(solved['textures'] as Map);
 
-        // Backend already returns absolute URLs (Option A)
+        // Backend already returns absolute URLs
         final urls = <String, String>{
           'U': textures['U'] as String,
           'R': textures['R'] as String,
@@ -214,7 +214,7 @@ class _CameraPageState extends State<CameraPage> {
     }
   }
 
-  // Kept (not exposed in the old UI)
+  
   void _retakePrevious() {
     if (_isUploading || _currentFace == 0) return;
     final prev = _faceOrder[_currentFace - 1];
@@ -224,7 +224,7 @@ class _CameraPageState extends State<CameraPage> {
     });
   }
 
-  // Kept (not exposed in the old UI)
+  
   void _resetAll() {
     if (_isUploading) return;
     setState(() {
@@ -243,7 +243,7 @@ class _CameraPageState extends State<CameraPage> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
 
-    // pretty label like before
+    // pretty label
     final pretty = {'U': 'Up', 'R': 'Right', 'F': 'Front', 'D': 'Down', 'L': 'Left', 'B': 'Back'};
     final faceKey = _currentFace < _faceOrder.length ? _faceOrder[_currentFace] : _faceOrder.last;
     final faceLabel = pretty[faceKey] ?? faceKey;
@@ -276,8 +276,8 @@ class _CameraPageState extends State<CameraPage> {
                     margin: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.06), // subtle translucent fill
-                      border: Border.all(color: Colors.white70, width: 3),
-                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white70, width: 3), // essentially a box outline of a cube face
+                      borderRadius: BorderRadius.circular(10),              // improves the scanability
                     ),
                   ),
                 ),
