@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 
 import '../services/api.dart'; // uploadOneFace, solveFromGrids
+import 'package:mobile_app/pages/solve_coach.dart';
 
 class CameraPage extends StatefulWidget {
   const CameraPage({Key? key}) : super(key: key);
@@ -17,15 +19,15 @@ class _CameraPageState extends State<CameraPage> {
   bool _isCameraReady = false;
   bool _isUploading = false;
 
-  // Torch toggle (kept; shown in AppBar)
+  // Torch toggle
   bool _torchOn = false;
 
-  // Per-face flow state (order must match your backend expectation)
+  // Per-face flow (must match backend)
   final List<String> _faceOrder = ['U', 'R', 'F', 'D', 'L', 'B'];
   int _currentFace = 0;
   final Map<String, List<List<String>>> _grids = {};
 
-  // For 3×3 preview dialog
+  // Colors for the 3×3 preview
   final Map<String, Color> _colorMap = const {
     'W': Colors.white,
     'Y': Colors.yellow,
@@ -81,6 +83,29 @@ class _CameraPageState extends State<CameraPage> {
         ],
       ),
     );
+  }
+
+  Future<bool> _askRetry(String message) async {
+    if (!mounted) return false;
+    return await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+            title: const Text('Scan issue'),
+            content: Text(message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false), // Retake
+                child: const Text('Retake'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true), // Retry
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   Future<bool> _confirmUseFace(String label, List<List<String>> grid) async {
@@ -163,79 +188,96 @@ class _CameraPageState extends State<CameraPage> {
           .map((row) => List<String>.from(row as List))
           .toList();
 
-      // Log the grid in console (handy during tuning)
+      // log the grid (pretty)
       for (final row in grid) {
-        debugPrint(row.join(' '));
+        // ignore: avoid_print
+        print(row.join(' '));
       }
 
-      // Ask user to accept or retake this face
-      final ok = await _confirmUseFace(currentLabel, grid);
-      if (!mounted) return;
+      // Stop spinner before asking
+      if (mounted) setState(() => _isUploading = false);
 
+      // Confirm / Retake
+      final ok = await _confirmUseFace(currentLabel, grid);
       if (!ok) {
-        // User chose Retake → do not store or advance
-        setState(() => _isUploading = false);
+        // User wants to retake this same face; do nothing else.
         return;
       }
 
+      // Commit this face
       _grids[currentLabel] = grid;
-
-      // Next face
       setState(() => _currentFace++);
 
-      // When all six faces captured → solve
+      // If all 6 faces captured → solve
       if (_currentFace == _faceOrder.length) {
-        final solved = await solveFromGrids(_grids);
-        final textures = Map<String, dynamic>.from(solved['textures'] as Map);
-
-        // Backend already returns absolute URLs
-        final urls = <String, String>{
-          'U': textures['U'] as String,
-          'R': textures['R'] as String,
-          'F': textures['F'] as String,
-          'D': textures['D'] as String,
-          'L': textures['L'] as String,
-          'B': textures['B'] as String,
-        };
-
-        if (!mounted) return;
-        setState(() => _isUploading = false);
-
-        // Navigate to your 3D viewer (expects Map<String,String> argument)
-        Navigator.pushNamed(context, '/viewer', arguments: urls);
-      } else {
-        if (mounted) setState(() => _isUploading = false);
+        await _solveAndNavigate();
       }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isUploading = false);
-      _showError('Scan failed: $e');
-      // Do not advance; user can tap again to retake this face.
+
+      // Ask to retry upload or retake
+      final retry = await _askRetry('Scan failed: $e');
+      if (retry) {
+        // try again
+        await _capture();
+      } else {
+        // stay on same face; user will take another photo
+      }
     }
   }
 
-  
-  void _retakePrevious() {
-    if (_isUploading || _currentFace == 0) return;
-    final prev = _faceOrder[_currentFace - 1];
-    setState(() {
-      _grids.remove(prev);
-      _currentFace -= 1;
-    });
-  }
+  Future<void> _solveAndNavigate() async {
+    try {
+      setState(() => _isUploading = true);
 
-  
-  void _resetAll() {
-    if (_isUploading) return;
-    setState(() {
-      _grids.clear();
-      _currentFace = 0;
-    });
+      // Attempt solve (with one optional retry via dialog)
+      while (true) {
+        try {
+          final solved = await solveFromGrids(_grids);
+          final moves = List<String>.from(solved['solution'] ?? const <String>[]);
+
+          if (!mounted) return;
+          setState(() => _isUploading = false);
+
+          // Go to SolveCoachPage
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => SolveCoachPage(
+                faceGrids: _grids,
+                moves: moves,
+              ),
+            ),
+          );
+
+          // (Optional) reset when coming back
+          // setState(() { _grids.clear(); _currentFace = 0; });
+          break;
+        } catch (e) {
+          if (!mounted) return;
+          setState(() => _isUploading = false);
+          final retry = await _askRetry('Solve failed: $e');
+          if (retry) {
+            setState(() => _isUploading = true);
+            continue; // retry loop
+          } else {
+            // Let user retake the last face, if you want:
+            setState(() {
+              _currentFace = _faceOrder.length - 1;
+              _grids.remove(_faceOrder.last);
+            });
+            break;
+          }
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _isUploading = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    // old simple spinners while busy/uninitialized
+    // simple spinners while busy/uninitialized
     if (!_isCameraReady || _controller == null || !_controller!.value.isInitialized) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
@@ -262,7 +304,7 @@ class _CameraPageState extends State<CameraPage> {
       ),
       body: Stack(
         children: [
-          // classic simple preview (no extra scaling logic)
+          // simple preview (kept)
           Positioned.fill(child: CameraPreview(_controller!)),
 
           // Center overlay guide (semi-transparent square like a face)
@@ -276,8 +318,8 @@ class _CameraPageState extends State<CameraPage> {
                     margin: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.06), // subtle translucent fill
-                      border: Border.all(color: Colors.white70, width: 3), // essentially a box outline of a cube face
-                      borderRadius: BorderRadius.circular(10),              // improves the scanability
+                      border: Border.all(color: Colors.white70, width: 3), // box outline
+                      borderRadius: BorderRadius.circular(10),
                     ),
                   ),
                 ),
