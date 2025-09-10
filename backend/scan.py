@@ -1,5 +1,5 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, Request
-from typing import List, Dict, Any, Tuple
+from fastapi import APIRouter, File, UploadFile, HTTPException
+from typing import List, Dict, Tuple
 from itertools import product
 from pathlib import Path
 import time
@@ -11,34 +11,71 @@ from .solver.kociemba_solver import solve_cube
 from .utils.generate_textures import generate_all_textures
 from .schemas import FaceGrid, SolveRequest
 
-# This is where textures will be written
+# Where textures will be written
 TEXTURE_DIR = Path(__file__).parent / "static" / "textures"
 TEXTURE_DIR.mkdir(parents=True, exist_ok=True)
 
 router = APIRouter()
 
-# --- Color classification ranges (HSV, OpenCV Hue 0..180) ---
+# -------------------- Color configuration --------------------
+# OpenCV HSV: H in [0..180], S,V in [0..255]
+# Loosened bands to be more tolerant (esp. blue/green).
 COLOR_RANGES: Dict[str, Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {
-    'W':  ((0,   0,   160), (180,  60, 255)),   # unchanged (white handled also by explicit rule)
-    'Y':  ((20,  40,   80), (40,  255, 255)),
-    'R1': ((0,   40,   60), (12,  255, 255)),
-    'R2': ((168, 40,   60), (180, 255, 255)),
-    'O':  ((10,  40,   60), (24,  255, 255)),
-    'G':  ((45,  30,   40), (95,  255, 255)),   # ↑ upper bound to 95
-    'B':  ((95,  25,   35), (140, 255, 255)),   # ↑ widen & allow lower S/V
+    # White: very low saturation, high value
+    'W':  ((0,   0,  175), (180,  70, 255)),
+
+    # Yellow
+    'Y':  ((18,  70,  70), (45,  255, 255)),
+
+    # Red wraps hue at 0/180
+    'R1': ((0,   70,  50), (12,  255, 255)),
+    'R2': ((168, 70,  50), (180, 255, 255)),
+
+    # Orange (slightly wider)
+    'O':  ((8,   70,  50), (24,  255, 255)),
+
+    # Green (wider and lower S/V floor)
+    'G':  ((45,  50,  45), (90,  255, 255)),
+
+    # Blue – much wider and lower S/V floor to help in dim light
+    'B':  ((90,  40,  40), (140, 255, 255)),
 }
 
 # Anchors for nearest-color fallback
-COLOR_ANCHORS: Dict[str, Tuple[float, float, float]] = {
-    'W': (  0.0,  10.0, 230.0),
-    'Y': ( 30.0, 180.0, 200.0),
-    'R': (  0.0, 180.0, 180.0),
-    'O': ( 17.0, 180.0, 200.0),
-    'G': ( 60.0, 180.0, 180.0),
-    'B': (110.0, 180.0, 180.0),
+ANCHOR_HSV: Dict[str, Tuple[float, float, float]] = {
+    'W': (  0.0,  10.0, 235.0),
+    'Y': ( 30.0, 180.0, 220.0),
+    'R': (  0.0, 200.0, 200.0),
+    'O': ( 17.0, 200.0, 210.0),
+    'G': ( 60.0, 200.0, 200.0),
+    'B': (115.0, 200.0, 210.0),
 }
 
+# -------------------- Helpers --------------------
+
+def grayworld_awb(bgr: np.ndarray) -> np.ndarray:
+    """Simple gray-world auto white balance."""
+    b, g, r = cv2.split(bgr)
+    meanR, meanG, meanB = np.mean(r), np.mean(g), np.mean(b)
+    meanR = max(meanR, 1e-6)  # avoid div by zero
+    meanB = max(meanB, 1e-6)
+    kr = meanG / meanR
+    kb = meanG / meanB
+    r = np.clip(r * kr, 0, 255).astype(np.uint8)
+    b = np.clip(b * kb, 0, 255).astype(np.uint8)
+    return cv2.merge([b, g, r])
+
+def apply_clahe_v(bgr: np.ndarray) -> np.ndarray:
+    """CLAHE on V channel to boost dark faces."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    v2 = clahe.apply(v)
+    hsv2 = cv2.merge([h, s, v2])
+    return cv2.cvtColor(hsv2, cv2.COLOR_HSV2BGR)
+
 def order_points(pts: np.ndarray) -> np.ndarray:
+    """Return points ordered as tl, tr, br, bl."""
     x_sorted = pts[np.argsort(pts[:, 0]), :]
     left = x_sorted[:2, :]
     right = x_sorted[2:, :]
@@ -46,68 +83,43 @@ def order_points(pts: np.ndarray) -> np.ndarray:
     tr, br = right[np.argsort(right[:, 1]), :]
     return np.array([tl, tr, br, bl], dtype="float32")
 
-def classify_color_strict(avg_hsv: Tuple[float, float, float]) -> str:
-    H, S, V = avg_hsv
-
-    # Explicit white rule first: low saturation + high value
-    if S <= 30 and V >= 180:
-        return 'W'
-
-    # Normal ranges
-    for key, (lo, hi) in COLOR_RANGES.items():
-        if all(lo[i] <= avg_hsv[i] <= hi[i] for i in range(3)):
-            return 'R' if key in ('R1', 'R2') else key
-
-    # Blue/Green boundary nudge (90–100° hue is tricky)
-    if 90 <= H <= 100:
-        # a slight preference towards Blue if saturation is decent
-        return 'B' if S >= 60 else 'G'
-
-    raise ValueError(f"Unclassified cell HSV={tuple(round(x,1) for x in avg_hsv)}")
-
-
-def expand_range(lo, hi, pad_h=6, pad_s=25, pad_v=25):
-    lo2 = (max(0, lo[0]-pad_h), max(0, lo[1]-pad_s), max(0, lo[2]-pad_v))
-    hi2 = (min(180, hi[0]+pad_h), min(255, hi[1]+pad_s), min(255, hi[2]+pad_v))
+def expand_range(lo, hi, dh=10, ds=45, dv=45):
+    lo2 = (max(0, lo[0]-dh), max(0, lo[1]-ds), max(0, lo[2]-dv))
+    hi2 = (min(180, hi[0]+dh), min(255, hi[1]+ds), min(255, hi[2]+dv))
     return lo2, hi2
 
 def hue_dist(h1: float, h2: float) -> float:
     d = abs(h1 - h2)
     return min(d, 180 - d)
 
-def nearest_color(avg_hsv: Tuple[float, float, float]) -> str:
+def nearest_color_hsv(avg_hsv: Tuple[float,float,float]) -> str:
+    """Weighted nearest anchor in HSV space (fallback)."""
     H, S, V = avg_hsv
-    best_c, best_d = None, 1e9
-    for c, (h0, s0, v0) in COLOR_ANCHORS.items():
-        hd = min(hue_dist(H, h0), hue_dist(H, 180.0 if c == 'R' else h0))
-        d = 2.0*hd + 1.0*abs(S - s0) + 0.5*abs(V - v0)
+    best, best_d = None, 1e9
+    for c, (h0, s0, v0) in ANCHOR_HSV.items():
+        hd = min(hue_dist(H, h0), hue_dist(H, 180.0 if c == 'R' else h0))  # red wrap
+        d = 2.2*hd + 0.8*abs(S - s0) + 0.6*abs(V - v0)
         if d < best_d:
-            best_d, best_c = d, c
-    return best_c or 'W'
+            best, best_d = c, d
+    return best or 'W'
 
-def classify_color_relaxed(avg_hsv: Tuple[float, float, float]) -> str:
-    for key, (lo, hi) in COLOR_RANGES.items():
-        lo2, hi2 = expand_range(lo, hi)
-        if all(lo2[i] <= avg_hsv[i] <= hi2[i] for i in range(3)):
-            return 'R' if key in ('R1','R2') else key
-    return nearest_color(avg_hsv)
-
-def preprocess_variants(img_bgr: np.ndarray):
-    out = []
+def preprocess_variants(img_bgr: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+    """Generate several edge/binary variants to find the cube quad."""
+    out: List[Tuple[str, np.ndarray]] = []
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     hsv  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-
-    def morph_close(edges, k=7):
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        return cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-
-    edgesA = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 50, 150)
-    out.append(("canny_50_150", morph_close(edgesA, 7)))
-
-    edgesB = cv2.Canny(cv2.GaussianBlur(gray, (5,5), 0), 30, 120)
-    out.append(("canny_30_120", morph_close(edgesB, 7)))
-
     blur = cv2.GaussianBlur(gray, (5,5), 0)
+
+    def close(x, k=7):
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        return cv2.morphologyEx(x, cv2.MORPH_CLOSE, kernel)
+
+    edgesA = cv2.Canny(blur, 50, 150)
+    out.append(("canny_50_150", close(edgesA, 7)))
+
+    edgesB = cv2.Canny(blur, 30, 120)
+    out.append(("canny_30_120", close(edgesB, 7)))
+
     _, otsu = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     out.append(("otsu", otsu))
 
@@ -118,7 +130,7 @@ def preprocess_variants(img_bgr: np.ndarray):
     s = hsv[...,1]
     _, s_mask = cv2.threshold(s, 40, 255, cv2.THRESH_BINARY)
     edgesE = cv2.Canny(blur, 40, 120)
-    out.append(("s_mask_canny", morph_close(cv2.bitwise_and(edgesE, s_mask), 5)))
+    out.append(("s_mask_canny", close(cv2.bitwise_and(edgesE, s_mask), 5)))
     return out
 
 def find_quad_from_binary(bin_img: np.ndarray) -> np.ndarray:
@@ -135,85 +147,173 @@ def find_quad_from_binary(bin_img: np.ndarray) -> np.ndarray:
     box  = cv2.boxPoints(rect).astype("float32")
     return order_points(box)
 
+def classify_strict(avg_hsv: Tuple[float,float,float]) -> str:
+    for key, (lo, hi) in COLOR_RANGES.items():
+        if all(lo[i] <= avg_hsv[i] <= hi[i] for i in range(3)):
+            return 'R' if key in ('R1','R2') else key
+    raise ValueError("no_match")
+
+def classify_relaxed(avg_hsv: Tuple[float,float,float]) -> str:
+    H,S,V = avg_hsv
+    if S < 25 and V > 200:
+        return 'W'
+    for key, (lo, hi) in COLOR_RANGES.items():
+        lo2, hi2 = expand_range(lo, hi)
+        if all(lo2[i] <= avg_hsv[i] <= hi2[i] for i in range(3)):
+            return 'R' if key in ('R1','R2') else key
+    return nearest_color_hsv(avg_hsv)
+
+def lab_kmeans_fallback(avg_bgr_cells: List[np.ndarray]) -> List[str]:
+    """Last-resort: cluster the 9 cell means in LAB (K=3) and map to nearest anchors."""
+    labs = []
+    for bgr in avg_bgr_cells:
+        lab = cv2.cvtColor(bgr[None,None,:], cv2.COLOR_BGR2LAB)[0,0,:]
+        labs.append(lab.astype(np.float32))
+    samples = np.array(labs, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER, 50, 0.5)
+    _compactness, labels, centers = cv2.kmeans(samples, K=3, bestLabels=None,
+                                               criteria=criteria, attempts=5,
+                                               flags=cv2.KMEANS_PP_CENTERS)
+    mapped: Dict[int, str] = {}
+    for i, c in enumerate(centers):
+        lab = c[None,None,:].astype(np.uint8)
+        bgr = cv2.cvtColor(lab, cv2.COLOR_Lab2BGR)[0,0,:]
+        hsv = cv2.cvtColor(bgr[None,None,:], cv2.COLOR_BGR2HSV)[0,0,:].astype(float)
+        mapped[i] = nearest_color_hsv(tuple(hsv))
+    return [mapped[int(k)] for k in labels.flatten()]
+
+def circular_mean_h(h_list: List[float]) -> float:
+    """Mean on circular hue (0..180 for OpenCV)."""
+    # map to [0..pi], do vector mean, map back to [0..180]
+    ang = np.deg2rad(np.array(h_list) * 2.0)  # *2 to map 0..180 -> 0..360 deg
+    s = np.sin(ang).mean()
+    c = np.cos(ang).mean()
+    a = np.arctan2(s, c)
+    if a < 0:
+        a += 2*np.pi
+    return float(np.rad2deg(a) / 2.0)
+
 def extract_face_grid_timed(data: bytes):
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
 
+    # decode
     arr = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
+    img0 = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img0 is None:
         raise ValueError("Could not decode image")
     timings['decode'] = time.perf_counter() - t0
 
-    h, w = img.shape[:2]
-    s = 900 / max(h, w)
-    if s < 1.0:
-        img = cv2.resize(img, (int(w*s), int(h*s)), interpolation=cv2.INTER_AREA)
+    # pre: gentle AWB + CLAHE (blend to avoid blue hue shift)
+    awb = grayworld_awb(img0)
+    img = cv2.addWeighted(img0, 0.5, awb, 0.5, 0)
+    img = apply_clahe_v(img)
 
+    # downscale
+    h, w = img.shape[:2]
+    max_dim = 900
+    s = max_dim / max(h, w)
+    if s < 1.0:
+        img = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+    # variants
     t1 = time.perf_counter()
     variants = preprocess_variants(img)
     timings['preproc_gen'] = time.perf_counter() - t1
 
-    quad, chosen_pass, last_err = None, None, None
+    # quad
     t2 = time.perf_counter()
+    quad, chosen = None, None
+    last_err = None
     for name, bin_img in variants:
         try:
             quad = find_quad_from_binary(bin_img)
-            chosen_pass = name
+            chosen = name
             break
         except Exception as e:
             last_err = e
     if quad is None:
-        raise ValueError(f"No contours found (all passes). Last error: {last_err}")
+        raise ValueError(f"No contours found (all passes). Last={last_err}")
     timings['quad'] = time.perf_counter() - t2
-    timings['quad_pass'] = chosen_pass or "unknown"
+    timings['quad_pass'] = chosen or "unknown"
 
+    # warp
     t3 = time.perf_counter()
     tl, tr, br, bl = quad
     W0 = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
     H0 = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
     cap = 600
     scale = min(1.0, cap / max(W0, H0))
-    W, H = max(3, int(W0*scale)), max(3, int(H0*scale))
-    dst = np.array([[0,0],[W,0],[W,H],[0,H]], dtype="float32")
-    M   = cv2.getPerspectiveTransform(quad, dst)
+    W = max(3, int(W0 * scale))
+    H = max(3, int(H0 * scale))
+    dst = np.array([[0, 0], [W, 0], [W, H], [0, H]], dtype="float32")
+    M = cv2.getPerspectiveTransform(quad, dst)
     warp = cv2.warpPerspective(img, M, (W, H))
     timings['warp'] = time.perf_counter() - t3
 
+    # classify
     t4 = time.perf_counter()
     hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
-    grid, conf, avg_hsv = [], [], []
-    cellW, cellH = W//3, H//3
-    failures = []
-    for r in range(3):
-        row_c, row_p, row_h = [], [], []
-        for c_ in range(3):
-            x0, y0 = c_*cellW, r*cellH
-            mx, my = int(cellW*0.2), int(cellH*0.2)
-            roi = hsv[y0+my:y0+cellH-my, x0+mx:x0+cellW-mx]
-            Hm = float(np.median(roi[...,0]))
-            Sm = float(np.median(roi[...,1]))
-            Vm = float(np.median(roi[...,2]))
-            avg = (Hm, Sm, Vm)
-            try:
-                color = classify_color_strict(avg)
-                row_c.append(color); row_p.append(1.0); row_h.append(avg)
-            except ValueError:
-                row_c.append('?'); row_p.append(0.0); row_h.append(avg)
-                failures.append((r, c_, avg))
-        grid.append(row_c); conf.append(row_p); avg_hsv.append(row_h)
+    grid, conf, avg_hsv, avg_bgr = [], [], [], []
+    cellW, cellH = W // 3, H // 3
 
+    # inner ROI margin (avoid sticker borders)
+    mxf, myf = 0.28, 0.28
+
+    failures: List[Tuple[int,int,Tuple[float,float,float]]] = []
+    for r in range(3):
+        row_c, row_p = [], []
+        for c_ in range(3):
+            x0, y0 = c_ * cellW, r * cellH
+            mx, my = int(cellW * mxf), int(cellH * myf)
+            roi_hsv = hsv[y0+my:y0+cellH-my, x0+mx:x0+cellW-mx]
+            roi_bgr = warp[y0+my:y0+cellH-my, x0+mx:x0+cellW-mx]
+            if roi_hsv.size == 0:
+                raise ValueError("ROI too small; align the face in the guide.")
+            Hm = float(np.median(roi_hsv[..., 0]))
+            Sm = float(np.median(roi_hsv[..., 1]))
+            Vm = float(np.median(roi_hsv[..., 2]))
+            avg = (Hm, Sm, Vm)
+            avg_hsv.append(avg)
+            avg_bgr.append(np.median(roi_bgr.reshape(-1,3), axis=0))
+
+            try:
+                color = classify_strict(avg)
+                row_c.append(color); row_p.append(1.0)
+            except ValueError:
+                row_c.append('?'); row_p.append(0.0)
+                failures.append((r, c_, avg))
+        grid.append(row_c); conf.append(row_p)
+
+    # relaxed fill for fails
     for r, c_, avg in failures:
-        color = classify_color_relaxed(avg)
+        color = classify_relaxed(avg)
         grid[r][c_] = color
         conf[r][c_] = 0.6
 
+    # If any still '?', do LAB/KMeans over the 9 cells
+    if any(grid[r][c] == '?' for r in range(3) for c in range(3)):
+        labels = lab_kmeans_fallback([b.astype(np.uint8) for b in avg_bgr])
+        k = 0
+        for r in range(3):
+            for c_ in range(3):
+                if grid[r][c_] == '?':
+                    grid[r][c_] = labels[k]
+                k += 1
+
+
+
     timings['classify'] = time.perf_counter() - t4
 
+    # ensure no '?'
     if any(grid[r][c] == '?' for r in range(3) for c in range(3)):
-        bad = [(r, c, tuple(round(x,1) for x in avg_hsv[r][c]))
-               for r in range(3) for c in range(3) if grid[r][c] == '?']
-        raise ValueError(f"Unclassified cells remain after multipass: {bad[:3]}")
+        bad = [(r, c) for r in range(3) for c in range(3) if grid[r][c] == '?']
+        raise ValueError(f"Unclassified cells remain at {bad}; recapture with the on-screen guide.")
+
+    flat = [p for row in grid for p in row]
+    mode_color = max(set(flat), key=flat.count)
+    if flat.count(mode_color) >= 5 and grid[1][1] != mode_color:
+        grid[1][1] = mode_color
 
     return {
         "grid": grid,
@@ -221,7 +321,7 @@ def extract_face_grid_timed(data: bytes):
         "rotation": 0,
         "corners": quad.tolist(),
         "conf": conf,
-        "avg_hsv": avg_hsv,
+        "avg_hsv": [[list(x) for x in avg_hsv[i*3:(i+1)*3]] for i in range(3)],
         "debug_pass": timings.get('quad_pass', 'unknown'),
     }, timings
 
@@ -235,29 +335,45 @@ def rotate_grid_cw(grid: List[List[str]], k: int) -> List[List[str]]:
 def flatten_grid(grid: List[List[str]]) -> str:
     return ''.join(''.join(row) for row in grid)
 
+# -------------------- Routes --------------------
+
 @router.post("/scan_face")
 async def scan_face(image: UploadFile = File(...)):
     try:
         t0 = time.perf_counter()
         data = await image.read()
+        print(f"[scan_face] bytes={len(data)}")
+
         res, timings = extract_face_grid_timed(data)
         t1 = time.perf_counter()
 
-        print("[scan_face] pass=%s decode=%.3fs preproc_gen=%.3fs quad=%.3fs warp=%.3fs classify=%.3fs TOTAL=%.3fs center=%s" %
-              (res.get('debug_pass'), timings.get('decode',0.0), timings.get('preproc_gen',0.0),
-               timings.get('quad',0.0), timings.get('warp',0.0), timings.get('classify',0.0),
-               (t1 - t0), res.get('center')))
+        def _fmt(x):
+            try:
+                return f"{float(x):.3f}"
+            except Exception:
+                return str(x)
 
-        # ensure 3x3 letters and nudge center to face majority if off by 1
+        print(
+            "[scan_face] pass=%s decode=%ss preproc_gen=%ss quad=%ss warp=%ss classify=%ss TOTAL=%ss center=%s"
+            % (
+                res.get('debug_pass') or timings.get('quad_pass', 'unknown'),
+                _fmt(timings.get('decode')),
+                _fmt(timings.get('preproc_gen')),
+                _fmt(timings.get('quad')),
+                _fmt(timings.get('warp')),
+                _fmt(timings.get('classify')),
+                _fmt(t1 - t0),
+                res.get('center'),
+            )
+        )
+
+        # Basic grid validation
         grid = res["grid"]
-        if len(grid)!=3 or any(len(row)!=3 for row in grid):
-            raise HTTPException(400, "Bad grid shape (expected 3x3).")
-        flat = [p for row in grid for p in row]
-        mode_color = max(set(flat), key=flat.count)
-        if flat.count(mode_color) >= 5 and grid[1][1] != mode_color:
-            grid[1][1] = mode_color
-            res["grid"] = grid
-            res["center"] = mode_color
+        allowed = set("WYROGB")
+        for r in range(3):
+            for c in range(3):
+                if grid[r][c] not in allowed:
+                    raise HTTPException(400, f"Unknown color '{grid[r][c]}' at ({r},{c}).")
 
         return res
 
@@ -269,72 +385,157 @@ async def scan_face(image: UploadFile = File(...)):
         raise HTTPException(500, f"Unexpected error: {e}")
 
 @router.post("/solve_from_grids")
-async def solve_from_grids(req: SolveRequest, request: Request):
+async def solve_from_grids(req: SolveRequest):
+    """
+    Robust solver:
+    - Ignores the labels you used while scanning (U/R/F/D/L/B).
+    - Uses the center sticker color of each scanned face to reassign faces.
+    - Tries both common schemes:
+        * Up=White (or Yellow), Front=Green (or Blue), with the implied Right/Left.
+    - Searches rotations only (not permutations), which is now safe because faces are
+      placed correctly by color.
+    """
     required = ['U', 'R', 'F', 'D', 'L', 'B']
     if sorted(req.faces.keys()) != sorted(required):
         raise HTTPException(400, f"faces must include exactly {required}")
 
+    # 1) Pull raw grids and validate 3x3
     raw_grids: Dict[str, List[List[str]]] = {f: req.faces[f].grid for f in required}
     for f, g in raw_grids.items():
         if len(g) != 3 or any(len(row) != 3 for row in g):
             raise HTTPException(400, f"{f} grid must be 3x3")
 
-    # center = face majority
+    def flatten_grid(grid: List[List[str]]) -> str:
+        return ''.join(''.join(row) for row in grid)
+
+    def rotate_grid_cw(grid: List[List[str]], k: int) -> List[List[str]]:
+        k %= 4
+        g = [row[:] for row in grid]
+        for _ in range(k):
+            g = [[g[2 - c][r] for c in range(3)] for r in range(3)]
+        return g
+
     def face_mode(grid: List[List[str]]) -> str:
         flat = [ch for row in grid for ch in row]
         return max(set(flat), key=flat.count)
 
-    centers_by_face = {f: face_mode(raw_grids[f]) for f in required}
-    if len(set(centers_by_face.values())) != 6:
-        raise HTTPException(400, f"centers not unique; centers={centers_by_face}")
+    # 2) Build color->grid map based on centers (most frequent on the face)
+    #    This frees users from the exact order they scanned.
+    centers_by_capture: Dict[str, str] = {f: face_mode(raw_grids[f]) for f in required}
+    # ensure uniqueness and valid colors
+    centers = list(centers_by_capture.values())
+    if len(set(centers)) != 6:
+        raise HTTPException(400, f"centers not unique; centers={centers_by_capture}")
+    if set(centers) != set(list("WYROGB")):
+        raise HTTPException(400, f"need exactly W,Y,R,O,G,B centers; got {sorted(set(centers))}")
 
-    color_to_face = {color: face for face, color in centers_by_face.items()}
+    # Map center color -> the actual 3x3 grid we scanned
+    color_to_grid: Dict[str, List[List[str]]] = {}
+    for label in required:
+        c = centers_by_capture[label]
+        color_to_grid[c] = raw_grids[label]
 
-    # sanity on color counts
-    all_colors = ''.join(flatten_grid(raw_grids[f]) for f in required)
-    color_counts = {c: all_colors.count(c) for c in set(all_colors)}
-    expected = set(color_to_face.keys())
-    bad = [c for c in color_counts if c not in expected or color_counts[c] != 9]
-    if bad:
-        raise HTTPException(
-            400,
-            f"color count issue: {color_counts}. Expect each of {sorted(expected)} exactly 9 times."
-        )
+    # 3) Candidate color schemes (common Rubik's layouts).
+    # Opposites are fixed: (W<->Y), (R<->O), (B<->G).
+    # With Up=W and Front=G -> Right=R, Left=O.
+    # With Up=W and Front=B -> Right=O, Left=R.
+    # With Up=Y, Right/Left swap accordingly.
+    def candidate_schemes() -> List[Dict[str, str]]:
+        opts: List[Dict[str, str]] = []
+        available = set(color_to_grid.keys())
 
-    faces_to_search = ['R', 'F', 'D', 'L', 'B']
-    for combo in product(range(4), repeat=len(faces_to_search)):
-        rot_map = {'U': 0}
-        rot_map.update({faces_to_search[i]: combo[i] for i in range(len(faces_to_search))})
+        for up in [c for c in ['W', 'Y'] if c in available]:
+            down = 'Y' if up == 'W' else 'W'
+            for front in [c for c in ['G', 'B'] if c in available]:
+                back = 'B' if front == 'G' else 'G'
+                if up == 'W':
+                    if front == 'G':
+                        right, left = 'R', 'O'
+                    else:  # front == 'B'
+                        right, left = 'O', 'R'
+                else:  # up == 'Y'
+                    if front == 'G':
+                        right, left = 'O', 'R'
+                    else:  # front == 'B'
+                        right, left = 'R', 'O'
 
-        mapped_facelets: List[str] = []
-        for f in required:
-            g_rot = rotate_grid_cw(raw_grids[f], rot_map[f])
-            s_color = flatten_grid(g_rot)
+                scheme_colors = [up, down, front, back, right, left]
+                if all(c in available for c in scheme_colors):
+                    opts.append({'U': up, 'D': down, 'F': front, 'B': back, 'R': right, 'L': left})
+        return opts
+
+    schemes = candidate_schemes()
+    if not schemes:
+        raise HTTPException(400, "could not infer a valid color scheme from centers; please re-capture with the guides")
+
+    # 4) Try each scheme; within each, try all rotations (anchor U=0°).
+    for scheme in schemes:
+        # color -> face letter map (inverse of scheme)
+        color_to_face = {col: face for face, col in scheme.items()}
+        # reassign grids to canonical letters by their center colors
+        faces_by_letter: Dict[str, List[List[str]]] = {f: color_to_grid[scheme[f]] for f in required}
+
+        # quick color-count sanity
+        all_colors = ''.join(flatten_grid(faces_by_letter[f]) for f in required)
+        counts = {c: all_colors.count(c) for c in set(all_colors)}
+        # only the 6 colors are allowed, each exactly 9 times
+        if set(counts.keys()) - set('WYROGB'):
+            # contains an unknown letter; try next scheme
+            continue
+        if any(counts.get(c, 0) != 9 for c in 'WYROGB'):
+            # misclassifications; try next scheme
+            continue
+
+        faces_to_search = ['R', 'F', 'D', 'L', 'B']
+        for combo in product(range(4), repeat=len(faces_to_search)):
+            rot_map = {'U': 0}
+            rot_map.update({faces_to_search[i]: combo[i] for i in range(len(faces_to_search))})
+
+            mapped_facelets: List[str] = []
+            ok = True
+            for f in required:
+                g_rot = rotate_grid_cw(faces_by_letter[f], rot_map[f])
+                s_color = flatten_grid(g_rot)
+                try:
+                    s_face = ''.join(color_to_face[ch] for ch in s_color)
+                except KeyError:
+                    ok = False
+                    break
+                mapped_facelets.append(s_face)
+
+            if not ok:
+                continue
+
+            cube_str = ''.join(mapped_facelets)
+            # every face letter must appear exactly 9 times
+            if any(cube_str.count(face) != 9 for face in required):
+                continue
+
+            # Try solver for this orientation
             try:
-                s_face = ''.join(color_to_face[ch] for ch in s_color)
-            except KeyError as e:
-                raise HTTPException(400, f"unknown color '{e.args[0]}' (centers={centers_by_face})")
-            mapped_facelets.append(s_face)
+                moves = solve_cube(cube_str).split()
+            except Exception:
+                continue  # try next rotation combo
 
-        cube_str = ''.join(mapped_facelets)
-        if any(cube_str.count(face) != 9 for face in required):
-            continue
+            # SUCCESS → write textures with the same rotation
+            rotated_for_textures = {
+                f: flatten_grid(rotate_grid_cw(faces_by_letter[f], rot_map[f]))
+                for f in required
+            }
+            generate_all_textures(rotated_for_textures, out_dir=str(TEXTURE_DIR))
+            textures = {f: f"/static/textures/{f}.png" for f in required}
+            return {
+                "solution": moves,
+                "textures": textures,
+                "rotations": rot_map,
+                "scheme": scheme,  # helpful for debugging / client display
+            }
 
-        try:
-            moves = solve_cube(cube_str).split()
-        except Exception:
-            continue
-
-        rotated_for_textures = {
-            f: flatten_grid(rotate_grid_cw(raw_grids[f], rot_map[f]))
-            for f in required
-        }
-        generate_all_textures(rotated_for_textures, out_dir=str(TEXTURE_DIR))
-        base = str(request.base_url).rstrip('/')
-        textures = {f: f"{base}/static/textures/{f}.png" for f in ['U','R','F','D','L','B']}
-        return {"solution": moves, "textures": textures, "rotations": rot_map}
-
+    # If we got here, nothing worked.
     raise HTTPException(
         400,
-        "auto-rotation failed: no consistent orientation found; please recapture with alignment guides."
+        "auto-rotation failed: no consistent orientation found.\n"
+        f"centers={centers_by_capture}. Try re-capturing with the on-screen guide, "
+        "and keep each face flat inside the box."
     )
+
