@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'pages/input_page.dart';
 import 'pages/camera_page.dart';
 import 'pages/cube_viewer.dart';
-
+import 'pages/solve_coach.dart';
 void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
@@ -17,9 +17,12 @@ class MyApp extends StatelessWidget {
       routes: {
         '/': (_) => const InputPage(),
         '/camera': (_) => const CameraPage(),
-        '/viewer': (ctx) {
-          final urls = ModalRoute.of(ctx)!.settings.arguments as Map<String, String>;
-          return CubeViewer(textureUrls: urls);
+        '/coach': (ctx) {
+          final args = ModalRoute.of(ctx)!.settings.arguments as Map;
+          return SolveCoachPage(
+          faceGrids: Map<String, List<List<String>>>.from(args['faceGrids']),
+          moves: args['moves'] != null ? List<String>.from(args['moves']) : const [],
+          );
         },
       },
       // safety net so unknown routes don’t crash:
