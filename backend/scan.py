@@ -441,28 +441,32 @@ async def solve_from_grids(req: SolveRequest):
     # With Up=W and Front=B -> Right=O, Left=R.
     # With Up=Y, Right/Left swap accordingly.
     def candidate_schemes() -> List[Dict[str, str]]:
-        opts: List[Dict[str, str]] = []
-        available = set(color_to_grid.keys())
+        '''
+        Enumerate all physically valid color-face mappings consistent with:
+        Opposites: (W<->Y), (R<->O), (G<->B).
+        Tries Up in {W, Y}, Front in any non-opposite color,
+        and both assignments for Right/Left.
+        Produces up to 16 schemes in total.
+        '''
+    opts: List[Dict[str, str]] = []
+    pairs = {'W': 'Y', 'Y': 'W', 'R': 'O', 'O': 'R', 'G': 'B', 'B': 'G'}
+    colors = set(color_to_grid.keys())
+    if colors != set('WYROGB'):
+        return opts  # missing a center color — let caller handle
 
-        for up in [c for c in ['W', 'Y'] if c in available]:
-            down = 'Y' if up == 'W' else 'W'
-            for front in [c for c in ['G', 'B'] if c in available]:
-                back = 'B' if front == 'G' else 'G'
-                if up == 'W':
-                    if front == 'G':
-                        right, left = 'R', 'O'
-                    else:  # front == 'B'
-                        right, left = 'O', 'R'
-                else:  # up == 'Y'
-                    if front == 'G':
-                        right, left = 'O', 'R'
-                    else:  # front == 'B'
-                        right, left = 'R', 'O'
+    for up in ['W', 'Y']:
+        down = pairs[up]
+        # Front can be any color except Up or its opposite (Down)
+        for front in [c for c in colors if c not in (up, down)]:
+            back = pairs[front]
+            # Remaining two colors become Right/Left in both orders
+            rem = [c for c in colors if c not in (up, down, front, back)]
+            if len(rem) != 2:
+                continue
+            opts.append({'U': up, 'D': down, 'F': front, 'B': back, 'R': rem[0], 'L': rem[1]})
+            opts.append({'U': up, 'D': down, 'F': front, 'B': back, 'R': rem[1], 'L': rem[0]})
+    return opts
 
-                scheme_colors = [up, down, front, back, right, left]
-                if all(c in available for c in scheme_colors):
-                    opts.append({'U': up, 'D': down, 'F': front, 'B': back, 'R': right, 'L': left})
-        return opts
 
     schemes = candidate_schemes()
     if not schemes:
