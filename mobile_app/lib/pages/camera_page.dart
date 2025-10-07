@@ -219,7 +219,7 @@ class _CameraPageState extends State<CameraPage> {
       // Ask to retry upload or retake
       final retry = await _askRetry('Scan failed: $e');
       if (retry) {
-        // try again
+        setState(() => _isUploading = true);
         await _capture();
       } else {
         // stay on same face; user will take another photo
@@ -228,52 +228,55 @@ class _CameraPageState extends State<CameraPage> {
   }
 
   Future<void> _solveAndNavigate() async {
-    try {
-      setState(() => _isUploading = true);
+  try {
+    setState(() => _isUploading = true);
 
-      // Attempt solve (with one optional retry via dialog)
-      while (true) {
+    while (true) {
+      try {
+        final solved = await solveFromGrids(_grids);
+        final moves = List<String>.from(solved['solution'] ?? const <String>[]);
+
+        // 🔦 Make sure the flashlight is OFF before leaving this page
         try {
-          final solved = await solveFromGrids(_grids);
-          final moves = List<String>.from(solved['solution'] ?? const <String>[]);
+          await _setTorch(false);
+          if (mounted) setState(() => _torchOn = false);
+        } catch (_) {}
 
-          if (!mounted) return;
-          setState(() => _isUploading = false);
+        if (!mounted) return;
+        setState(() => _isUploading = false);
 
-          // Go to SolveCoachPage
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => SolveCoachPage(
-                faceGrids: _grids,
-                moves: moves,
-              ),
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => SolveCoachPage(
+              faceGrids: _grids,
+              moves: moves,
             ),
-          );
+          ),
+        );
 
-          // (Optional) reset when coming back
-          // setState(() { _grids.clear(); _currentFace = 0; });
+        // (Optional) after returning you can reset or leave as-is.
+        break;
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _isUploading = false);
+        final retry = await _askRetry('Solve failed: $e');
+        if (retry) {
+          setState(() => _isUploading = true);
+          continue; // retry loop
+        } else {
+          setState(() {
+            _currentFace = _faceOrder.length - 1;
+            _grids.remove(_faceOrder.last);
+          });
           break;
-        } catch (e) {
-          if (!mounted) return;
-          setState(() => _isUploading = false);
-          final retry = await _askRetry('Solve failed: $e');
-          if (retry) {
-            setState(() => _isUploading = true);
-            continue; // retry loop
-          } else {
-            // Let user retake the last face, if you want:
-            setState(() {
-              _currentFace = _faceOrder.length - 1;
-              _grids.remove(_faceOrder.last);
-            });
-            break;
-          }
         }
       }
-    } finally {
-      if (mounted) setState(() => _isUploading = false);
     }
+  } finally {
+    if (mounted) setState(() => _isUploading = false);
   }
+}
+
 
   @override
   Widget build(BuildContext context) {
@@ -329,6 +332,7 @@ class _CameraPageState extends State<CameraPage> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: null,
         onPressed: _isUploading ? null : _capture,
         child: const Icon(Icons.camera_alt),
       ),
