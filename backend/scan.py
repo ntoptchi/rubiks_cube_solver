@@ -288,7 +288,7 @@ def extract_face_grid_timed(data: bytes):
     cellW, cellH = W // 3, H // 3
 
     # inner ROI margin (avoid sticker borders)
-    mxf, myf = 0.28, 0.28
+    mxf, myf = 0.32, 0.32
 
     failures: List[Tuple[int,int,Tuple[float,float,float]]] = []
     for r in range(3):
