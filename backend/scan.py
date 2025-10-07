@@ -22,23 +22,23 @@ router = APIRouter()
 # Loosened bands to be more tolerant (esp. blue/green).
 COLOR_RANGES: Dict[str, Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {
     # White: very low saturation, high value
-    'W':  ((0,   0,  175), (180,  70, 255)),
+    'W':  ((0,   0,  175), (180,  40, 255)),
 
     # Yellow
-    'Y':  ((18,  70,  70), (45,  255, 255)),
+    'Y':  ((24,  95,  95), (40,  255, 255)),
 
     # Red wraps hue at 0/180
-    'R1': ((0,   70,  50), (12,  255, 255)),
-    'R2': ((168, 70,  50), (180, 255, 255)),
+    'R1': ((0,   90,  60), (12,  255, 255)),
+    'R2': ((168, 90,  60), (180, 255, 255)),
 
     # Orange (slightly wider)
-    'O':  ((8,   70,  50), (24,  255, 255)),
+    'O':  ((10,   90,  60), (24,  255, 255)),
 
     # Green (wider and lower S/V floor)
-    'G':  ((45,  50,  45), (90,  255, 255)),
+    'G':  ((45,  60,  45), (85,  255, 255)),
 
     # Blue – much wider and lower S/V floor to help in dim light
-    'B':  ((90,  40,  40), (140, 255, 255)),
+    'B':  ((95,  65,  55), (135, 255, 255)),
 }
 
 # Anchors for nearest-color fallback
@@ -148,10 +148,24 @@ def find_quad_from_binary(bin_img: np.ndarray) -> np.ndarray:
     return order_points(box)
 
 def classify_strict(avg_hsv: Tuple[float,float,float]) -> str:
+    H,S,V = avg_hsv
+
+    # Whites that are just desaturated highlights
+    if S < 25 and V > 200:
+        return 'W'
+
+    # Nudge: if we are in the O/Y boundary (≈15–25°), prefer Orange unless S is extremely high
+    if 15.0 <= H <= 25.0 and 70.0 <= S <= 170.0:
+        return 'O'
+
+    # Try expanded ranges
     for key, (lo, hi) in COLOR_RANGES.items():
-        if all(lo[i] <= avg_hsv[i] <= hi[i] for i in range(3)):
+        lo2, hi2 = expand_range(lo, hi, dh=10, ds=40, dv=40)
+        if all(lo2[i] <= avg_hsv[i] <= hi2[i] for i in range(3)):
             return 'R' if key in ('R1','R2') else key
-    raise ValueError("no_match")
+
+    # Fallback to nearest anchor
+    return nearest_color_hsv(avg_hsv)
 
 def classify_relaxed(avg_hsv: Tuple[float,float,float]) -> str:
     H,S,V = avg_hsv
