@@ -53,6 +53,30 @@ ANCHOR_HSV: Dict[str, Tuple[float, float, float]] = {
 
 # -------------------- Helpers --------------------
 
+def circ_diff(a: float, b: float) -> float:
+    """Smallest signed circular difference on OpenCV hue [0..180]."""
+    d = (a - b) % 180.0
+    if d > 90.0:
+        d -= 180.0
+    return d
+
+# Anchor hue (degrees in OpenCV’s 0..180 scale)
+ANCHOR_HUE: Dict[str, float] = {
+    'W': 0.0,    # irrelevant, S is tiny
+    'Y': 30.0,
+    'O': 17.0,
+    'R': 0.0,    # we also wrap at 180 for red
+    'G': 60.0,
+    'B': 115.0,
+}
+
+def shift_hsv_hue(avg_hsv: Tuple[float,float,float], delta: float) -> Tuple[float,float,float]:
+    """Shift hue by -delta (so passing center->anchor delta recenters hues)."""
+    H, S, V = avg_hsv
+    H2 = (H - delta) % 180.0
+    return (H2, S, V)
+
+
 def grayworld_awb(bgr: np.ndarray) -> np.ndarray:
     """Simple gray-world auto white balance."""
     b, g, r = cv2.split(bgr)
@@ -281,18 +305,19 @@ def extract_face_grid_timed(data: bytes):
     warp = cv2.warpPerspective(img, M, (W, H))
     timings['warp'] = time.perf_counter() - t3
 
-    # classify
+        # classify
     t4 = time.perf_counter()
     hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
-    grid, conf, avg_hsv, avg_bgr = [], [], [], []
+
+    # --- collect per-cell medians first (so we can do per-face normalization) ---
+    cells_hsv: List[List[Tuple[float,float,float]]] = []
+    cells_bgr: List[List[np.ndarray]] = []
+    grid = []; conf = []
+
     cellW, cellH = W // 3, H // 3
-
-    # inner ROI margin (avoid sticker borders)
-    mxf, myf = 0.32, 0.32
-
-    failures: List[Tuple[int,int,Tuple[float,float,float]]] = []
+    mxf, myf = 0.32, 0.32  # slightly deeper ROI (was 0.28)
     for r in range(3):
-        row_c, row_p = [], []
+        row_hsv, row_bgr = [], []
         for c_ in range(3):
             x0, y0 = c_ * cellW, r * cellH
             mx, my = int(cellW * mxf), int(cellH * myf)
@@ -303,27 +328,67 @@ def extract_face_grid_timed(data: bytes):
             Hm = float(np.median(roi_hsv[..., 0]))
             Sm = float(np.median(roi_hsv[..., 1]))
             Vm = float(np.median(roi_hsv[..., 2]))
-            avg = (Hm, Sm, Vm)
-            avg_hsv.append(avg)
-            avg_bgr.append(np.median(roi_bgr.reshape(-1,3), axis=0))
+            row_hsv.append((Hm, Sm, Vm))
+            row_bgr.append(np.median(roi_bgr.reshape(-1,3), axis=0))
+        cells_hsv.append(row_hsv)
+        cells_bgr.append(row_bgr)
 
+    # ---- Pass A: quick relaxed classify to detect center color (majority) ----
+    prelim = [['?' for _ in range(3)] for _ in range(3)]
+    flat_colors = []
+    for r in range(3):
+        for c_ in range(3):
+            prelim[r][c_] = classify_relaxed(cells_hsv[r][c_])
+            flat_colors.append(prelim[r][c_])
+
+    # Majority-as-center (more robust if center sticker is slightly off)
+    mode_color = max(set(flat_colors), key=flat_colors.count)
+    center_color = mode_color
+
+    # Hue-align the whole face so the center sits on its anchor hue
+    center_h = cells_hsv[1][1][0]
+    anchor_h = ANCHOR_HUE.get(center_color, center_h)
+    delta = circ_diff(center_h, anchor_h)  # how much we need to move the face hues
+
+    cells_hsv_shift = [[shift_hsv_hue(cells_hsv[r][c_], delta) for c_ in range(3)] for r in range(3)]
+
+    # ---- Pass B: strict over shifted hues, then relaxed fallback ----
+    grid = [['?' for _ in range(3)] for _ in range(3)]
+    conf = [[0.0 for _ in range(3)] for _ in range(3)]
+    failures: List[Tuple[int,int,Tuple[float,float,float]]] = []
+
+    for r in range(3):
+        for c_ in range(3):
+            avg = cells_hsv_shift[r][c_]
             try:
                 color = classify_strict(avg)
-                row_c.append(color); row_p.append(1.0)
+                grid[r][c_] = color
+                conf[r][c_] = 1.0
             except ValueError:
-                row_c.append('?'); row_p.append(0.0)
                 failures.append((r, c_, avg))
-        grid.append(row_c); conf.append(row_p)
 
-    # relaxed fill for fails
     for r, c_, avg in failures:
         color = classify_relaxed(avg)
         grid[r][c_] = color
         conf[r][c_] = 0.6
 
-    # If any still '?', do LAB/KMeans over the 9 cells
-    if any(grid[r][c] == '?' for r in range(3) for c in range(3)):
-        labels = lab_kmeans_fallback([b.astype(np.uint8) for b in avg_bgr])
+    # ---- Pass C: snap-to-center for near-center hues (helps O vs Y edge) ----
+    # If a cell's shifted hue is close to the (shifted) center hue and is well-saturated, make it center_color.
+    Hc, Sc, Vc = cells_hsv_shift[1][1]
+    for r in range(3):
+        for c_ in range(3):
+            if grid[r][c_] == center_color:
+                continue
+            H, S, V = cells_hsv_shift[r][c_]
+            if S > 80 and V > 80:
+                if hue_dist(H, Hc) <= 8.0:  # within ~8 degrees in OpenCV hue
+                    grid[r][c_] = center_color
+                    conf[r][c_] = max(conf[r][c_], 0.7)
+
+    # If any still '?', do LAB/kmeans fallback on the *original* BGR means
+    if any(grid[r][c_] == '?' for r in range(3) for c_ in range(3)):
+        avg_bgr_flat = [cells_bgr[r][c_] for r in range(3) for c_ in range(3)]
+        labels = lab_kmeans_fallback([b.astype(np.uint8) for b in avg_bgr_flat])
         k = 0
         for r in range(3):
             for c_ in range(3):
@@ -331,19 +396,19 @@ def extract_face_grid_timed(data: bytes):
                     grid[r][c_] = labels[k]
                 k += 1
 
-
-
     timings['classify'] = time.perf_counter() - t4
 
     # ensure no '?'
-    if any(grid[r][c] == '?' for r in range(3) for c in range(3)):
-        bad = [(r, c) for r in range(3) for c in range(3) if grid[r][c] == '?']
+    if any(grid[r][c_] == '?' for r in range(3) for c_ in range(3)):
+        bad = [(r, c_) for r in range(3) for c_ in range(3) if grid[r][c_] == '?']
         raise ValueError(f"Unclassified cells remain at {bad}; recapture with the on-screen guide.")
 
+    # enforce center majority one last time
     flat = [p for row in grid for p in row]
     mode_color = max(set(flat), key=flat.count)
     if flat.count(mode_color) >= 5 and grid[1][1] != mode_color:
         grid[1][1] = mode_color
+
 
     return {
         "grid": grid,
