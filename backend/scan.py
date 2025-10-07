@@ -25,14 +25,14 @@ COLOR_RANGES: Dict[str, Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = {
     'W':  ((0,   0,  175), (180,  40, 255)),
 
     # Yellow
-    'Y':  ((24,  95,  95), (40,  255, 255)),
+    'Y':  ((24,  80,  90), (38,  255, 255)),
 
     # Red wraps hue at 0/180
     'R1': ((0,   90,  60), (12,  255, 255)),
     'R2': ((168, 90,  60), (180, 255, 255)),
 
     # Orange (slightly wider)
-    'O':  ((10,   90,  60), (24,  255, 255)),
+    'O':  ((8,   100,  60), (23,  255, 255)),
 
     # Green (wider and lower S/V floor)
     'G':  ((45,  60,  45), (85,  255, 255)),
@@ -168,14 +168,30 @@ def classify_strict(avg_hsv: Tuple[float,float,float]) -> str:
     return nearest_color_hsv(avg_hsv)
 
 def classify_relaxed(avg_hsv: Tuple[float,float,float]) -> str:
-    H,S,V = avg_hsv
-    if S < 25 and V > 200:
+    H, S, V = avg_hsv
+
+    # Whites: very low S but bright
+    if S < 28 and V > 200:
         return 'W'
+
+    # In warm light, Y drifts down; in cool light, O can drift up.
+    # Use a small hue window + saturation hint to decide.
+    if 16 <= H <= 28:
+        # Very orange-ish if hue is quite low or saturation is strong
+        if H < 22 or (H < 25 and S > 110):
+            return 'O'
+        else:
+            return 'Y'
+
+    # Expanded ranges for all colors
     for key, (lo, hi) in COLOR_RANGES.items():
-        lo2, hi2 = expand_range(lo, hi)
+        lo2, hi2 = expand_range(lo, hi, dh=10, ds=40, dv=40)
         if all(lo2[i] <= avg_hsv[i] <= hi2[i] for i in range(3)):
             return 'R' if key in ('R1','R2') else key
+
+    # Last-resort nearest anchor
     return nearest_color_hsv(avg_hsv)
+
 
 def lab_kmeans_fallback(avg_bgr_cells: List[np.ndarray]) -> List[str]:
     """Last-resort: cluster the 9 cell means in LAB (K=3) and map to nearest anchors."""
