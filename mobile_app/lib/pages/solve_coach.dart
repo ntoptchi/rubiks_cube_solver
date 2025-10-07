@@ -152,7 +152,6 @@ class _SolveCoachPageState extends State<SolveCoachPage> {
   Widget build(BuildContext context) {
     final moves = widget.moves;
     final total = moves.length;
-
     final move = (total == 0 || _step >= total) ? '' : moves[_step];
     final niceText = _humanizeMove(move);
 
@@ -184,7 +183,7 @@ class _SolveCoachPageState extends State<SolveCoachPage> {
               ),
               const SizedBox(height: 12),
 
-              // Mini face previews (overflow safe)
+              // Mini face previews (overflow-safe)
               const Text(
                 'Your scanned faces:',
                 style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
@@ -202,24 +201,77 @@ class _SolveCoachPageState extends State<SolveCoachPage> {
               const SizedBox(height: 16),
               const Divider(),
 
-              // Current step
+              // Move list (tap to jump) — HORIZONTALLY SCROLLABLE
+              if (moves.isNotEmpty) ...[
+                const Text(
+                  'Move list (tap to jump):',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: List.generate(moves.length, (i) {
+                        final m = moves[i];
+                        final isCurrent = i == _step;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: ChoiceChip(
+                            selected: isCurrent,
+                            onSelected: (_) => setState(() => _step = i),
+                            label: Text(
+                              m,
+                              style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+
+              // Current step (also safe for narrow screens)
               Row(
                 children: [
-                  Text(
-                    total == 0 ? 'No moves' : 'Step ${_step + 1} of $total',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
-                  const Spacer(),
-                  if (total > 0)
-                    Chip(
-                      label: Text(moves[_step],
-                          style: const TextStyle(
-                              fontFamily: 'monospace',
-                              fontWeight: FontWeight.w700)),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          Text(
+                            total == 0 ? 'No moves' : 'Step ${_step + 1} of $total',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(width: 12),
+                          if (total > 0)
+                            Chip(
+                              label: Text(
+                                moves[_step],
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
+                  ),
                 ],
               ),
               const SizedBox(height: 12),
+
+              // Instruction box
               if (total > 0)
                 Container(
                   width: double.infinity,
