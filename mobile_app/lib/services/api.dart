@@ -32,19 +32,66 @@ Future<Map<String, dynamic>> solveFromGrids(
   Map<String, List<List<String>>> grids,
 ) async {
   final uri = Uri.parse('$baseUrl/solve_from_grids');
+
   final faces = <String, dynamic>{};
   for (final f in ['U','R','F','D','L','B']) {
     faces[f] = {'grid': grids[f], 'rotation': 0};
   }
+
   final resp = await http
       .post(
         uri,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'faces': faces}),
       )
-      .timeout(const Duration(seconds: 20));
+      .timeout(const Duration(seconds: 30));
+
   if (resp.statusCode != 200) {
-    throw Exception(jsonDecode(resp.body)['detail'] ?? 'server error');
+    // Try to surface server message if present
+    try {
+      final err = jsonDecode(resp.body);
+      if (err is Map && err['detail'] != null) {
+        throw Exception(err['detail']);
+      }
+    } catch (_) {}
+    throw Exception('server error ${resp.statusCode}');
   }
-  return jsonDecode(resp.body) as Map<String, dynamic>;
+
+  final decoded = jsonDecode(resp.body);
+
+  // Always return a Map with a normalized List<String> in 'solution'.
+  if (decoded is Map<String, dynamic>) {
+    final map = Map<String, dynamic>.from(decoded);
+    map['solution'] = _normalizeMoves(map['solution']);
+    return map;
+  }
+
+  if (decoded is List) {
+    return {
+      'solution': _normalizeMoves(decoded),
+      'textures': null,
+      'rotations': null,
+    };
+  }
+
+  throw Exception('unexpected response shape from server');
 }
+
+List<String> _normalizeMoves(dynamic raw) {
+  // Accept: List<String>, List<Map>, space-separated String, null, etc.
+  if (raw is List) {
+    return raw.map<String>((e) {
+      if (e is String) return e;
+      if (e is Map && e['code'] is String) return e['code'] as String;
+      if (e is Map && e['move'] is String) return e['move'] as String;
+      return e.toString(); // last-resort stringification
+    }).toList();
+  }
+  if (raw is String) {
+    final s = raw.trim();
+    return s.isEmpty ? <String>[] : s.split(RegExp(r'\s+')).toList();
+  }
+  return <String>[];
+}
+
+
