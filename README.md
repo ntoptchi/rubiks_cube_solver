@@ -1,61 +1,163 @@
-# Rubik’s Cube Solver
+# Rubik's Cube Solver
 
-A cross-platform mobile application built with Flutter and Dart that captures and analyzes images of a Rubik’s Cube to compute and display an optimal solution using Kociemba’s two-phase algorithm.
+A full-stack mobile app that scans a real Rubik’s Cube, detects its colors face by face using computer vision, and then walks the user through solving it step-by-step.
+
+https://github.com/ntoptchi/rubiks_cube_solver
+
+---
+
+## Overview
+
+This project combines **Flutter** (for the mobile front-end) and **FastAPI + OpenCV** (for backend image processing and cube solving).  
+Users capture each face of a real cube using their phone camera. The backend extracts color grids, reconstructs the cube state, and computes the optimal solve sequence using the **Kociemba algorithm**.
+
+The app then guides the user through solving the cube interactively, move by move.
 
 ---
 
 ## Features
 
-* **Real-time Cube Capture**: Guides the user through capturing all six faces of the cube using the device camera plugin.
-* **Image Processing**: Applies OpenCV-inspired techniques for color detection, edge detection, and perspective correction directly in Dart.
-* **Fast Solving Algorithm**: Implements Kociemba’s two-phase algorithm to generate optimal move sequences in under a few seconds.
-* **Smooth UI Performance**: Utilizes Dart isolates and futures for asynchronous image analysis without janking the UI.
-* **Error Handling**: Detects and recovers from camera initialization issues (e.g., `LateInitializationError`) and invalid captures.
-* **Automated Testing**: Includes unit tests for processing routines and widget tests for UI components to maintain high code quality.
+### Computer Vision
+- Detects cube faces from phone camera images
+- Classifies each square color using HSV and LAB color spaces
+- Auto-white-balancing and CLAHE lighting correction
+- Works under various lighting conditions (torch optional)
+
+### Backend (FastAPI)
+- `/scan_face` — detects a 3×3 color grid from one face photo
+- `/solve_from_grids` — combines 6 scanned faces and returns:
+  - The full solution moves (e.g., `["F", "R'", "U2"]`)
+  - Generated cube textures for visualization
+  - Rotation metadata for internal consistency
+- Implements Kociemba 2-phase algorithm via Python wrapper
+
+### Frontend (Flutter)
+- Full camera interface with live preview & face guide overlay  
+- Optional torch toggle for low-light capture  
+- After each scan, users can review and confirm the 3×3 grid before continuing  
+- Displays the **Solve Coach** screen:
+  - Clear, human-readable move explanations  
+  - Visual preview of scanned faces  
+  - Step-by-step “Next” and “Back” buttons
 
 ---
 
-## Installation
+## Screenshots
 
-1. **Prerequisites**: Ensure you have Flutter installed (>= 3.0) and set up on your system.
-2. **Clone the repository**:
+| Scan Cube | Review Grid | Solve Coach | Solve Coach 2 |
+|------------|-------------|--------------|
+| ![camera](docs/camera.png) | ![review](docs/review.png) | ![coach1](docs/coach.png) | ![coach2](docs/coach1.png) |
 
-   ```bash
-   git clone https://github.com/yourusername/rubiks-cube-solver.git
-   cd rubiks-cube-solver
-   ```
-3. **Install dependencies**:
 
-   ```bash
-   flutter pub get
-   ```
-4. **Run on a device or emulator**:
-
-   ```bash
-   flutter run
-   ```
+*(replace these with your actual screenshots)*
 
 ---
 
-## Usage
+## Tech Stack
 
-1. Launch the app on your mobile device or emulator.
-2. Follow the on-screen prompts to capture each face of the cube: rotate to the next face when prompted.
-3. Once all faces are captured and validated, the solver will display a sequence of moves (e.g., `R U R' U'`).
-4. Follow the move list to solve your cube.
+| Component | Technology |
+|------------|-------------|
+| **Frontend** | Flutter (Dart), Camera plugin |
+| **Backend** | FastAPI (Python 3.10+), OpenCV, NumPy |
+| **Solver** | Kociemba algorithm |
+| **Image Handling** | CLAHE, HSV & LAB color detection |
+| **Communication** | REST via HTTP (JSON, multipart form-data) |
 
 ---
 
-## Roadmap (Work in Progress)
+## Setup Instructions
 
-The project is still under active development. Planned enhancements include:
+### Backend Setup
 
-* **Manual Color Correction**: Allow users to adjust detected colors if automatic detection misclassifies stickers.
-* **Support for Other Cubes**: Extend solving capabilities to 2×2, 4×4, and 5×5 cubes.
-* **Export & Share Solutions**: Provide options to export move sequences as text or animated GIFs and share with friends.
-* **Animated Move Playback**: Integrate 3D cube animations to visually demonstrate each step.
-* **UI/UX Polish**: Improve layout, add theming options, and refine capture guidance overlays.
-* **Performance Optimizations**: Profile and optimize image-processing routines for lower-end devices.
-* **Flutter Web/Desktop**: Port the application to web and desktop platforms.
+#### Requirements
+```bash
+python -m venv venv
+source venv/bin/activate  # (Windows: venv\Scripts\activate)
+pip install -r requirements.txt
+```
+
+#### Run FastAPI server
+```bash
+uvicorn main:app --reload
+```
+
+Server runs at:  
+`http://127.0.0.1:8000`
+
+Test endpoints at:  
+`http://127.0.0.1:8000/docs`
+
+---
+
+### Mobile Setup (Flutter)
+
+#### Requirements
+- Flutter SDK 3.0+
+- Android Studio or VS Code setup for Android/iOS
+
+#### Install dependencies
+```bash
+flutter pub get
+```
+
+#### Connect to backend
+Edit `/lib/services/api.dart`:
+```dart
+const baseUrl = 'http://127.0.0.1:8000/api';  // or your LAN IP
+```
+
+If testing on a physical Android device:
+```bash
+adb reverse tcp:8000 tcp:8000
+```
+
+#### Run app
+```bash
+flutter run
+```
+
+---
+
+## Architecture
+
+```
+mobile_app/
+├── lib/
+│   ├── pages/
+│   │   ├── camera_page.dart        # capture + face guide overlay
+│   │   ├── solve_coach.dart        # solution walkthrough
+│   │   └── input_page.dart         # entry / routing
+│   ├── services/api.dart           # backend communication
+│   └── main.dart                   # app entry point
+backend/
+├── main.py                         # FastAPI entry
+├── scan.py                         # /scan_face endpoint
+├── solver/kociemba_solver.py       # cube solver logic
+└── utils/generate_textures.py      # face texture rendering
+```
+
+---
+
+## Troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| **“Connection refused”** | Ensure `uvicorn` server is running and port reversed if on device |
+| **“auto-rotation failed”** | Re-scan with each face flat and well-lit |
+| **Blue/Orange misread** | Adjust lighting; avoid direct reflections; use natural light |
+
+---
+
+## Author
+
+**Nicholas Toptchi**  
+University of South Florida  
+📧 [ntoptchi@usf.edu]  
+💻 [LinkedIn](https://linkedin.com/in/nicholas-toptchi) · [GitHub](https://github.com/ntoptchi)
+
+---
+
+### ⭐ If you found this useful, consider starring the repo!
+
 
 
