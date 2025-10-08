@@ -2,8 +2,6 @@
 
 A full-stack mobile app that scans a real Rubik’s Cube, detects its colors face by face using computer vision, and then walks the user through solving it step-by-step.
 
-https://github.com/ntoptchi/rubiks_cube_solver
-
 ---
 
 ## Overview
