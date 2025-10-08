@@ -44,9 +44,13 @@ The app then guides the user through solving the cube interactively, move by mov
 
 ## Screenshots
 
-| Scan Cube | Review Grid | Solve Coach | Solve Coach 2 |
-|------------|-------------|--------------|
-| ![camera](docs/camera.png) | ![review](docs/review.png) | ![coach1](docs/coach.png) | ![coach2](docs/coach1.png) |
+| Scan Cube |
+| ![camera](docs/camera.png) |
+| Review Grid |
+| ![review](docs/review.png) |
+| Solve Coach |
+|![coach1](docs/coach.png) | 
+|![coach2](docs/coach1.png) |
 
 
 
