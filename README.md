@@ -44,11 +44,11 @@ The app then guides the user through solving the cube interactively, move by mov
 
 ## Screenshots
 
-| Scan Cube |
+# Scan Cube 
 ![camera](docs/camera.png) 
-| Review Grid |
+# Review Grid 
 ![review](docs/review.png) 
-| Solve Coach |
+# Solve Coach 
 ![coach1](docs/coach.png)  
 ![coach2](docs/coach1.png) 
 
