@@ -309,7 +309,7 @@ class _SolveCoachPageState extends State<SolveCoachPage> {
                       'A plain letter (e.g., F) means turn that face clockwise 90°.\n'
                       'A prime (′) like F′ means counter-clockwise 90°.\n'
                       'A “2” like R2 means turn that face 180°.',
-                      style: TextStyle(color: Color.fromARGB(179, 0, 0, 0)),
+                      style: TextStyle(color: Colors.black),
                     ),
                   ),
                 ],
