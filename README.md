@@ -49,7 +49,7 @@ The app then guides the user through solving the cube interactively, move by mov
 | ![camera](docs/camera.png) | ![review](docs/review.png) | ![coach1](docs/coach.png) | ![coach2](docs/coach1.png) |
 
 
-*(replace these with your actual screenshots)*
+
 
 ---
 
